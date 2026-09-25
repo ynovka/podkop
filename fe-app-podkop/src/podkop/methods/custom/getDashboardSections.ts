@@ -1,6 +1,7 @@
 import { getConfigSections } from './getConfigSections';
 import { Podkop } from '../../types';
-import { getProxyUrlName, splitProxyString } from '../../../helpers';
+import { getProxyUrlName } from '../../../helpers/getProxyUrlName';
+import { splitProxyString } from '../../../helpers/splitProxyString';
 import { PodkopShellMethods } from '../shell';
 
 interface IGetDashboardSectionsResponse {
@@ -10,7 +11,14 @@ interface IGetDashboardSectionsResponse {
 
 export async function getDashboardSections(): Promise<IGetDashboardSectionsResponse> {
   const configSections = await getConfigSections();
-  const clashProxies = await PodkopShellMethods.getClashApiProxies();
+  const [clashProxies, outboundNamesResponse] = await Promise.all([
+    PodkopShellMethods.getClashApiProxies(),
+    // Names are optional: the dashboard falls back to proxy names without them
+    PodkopShellMethods.getOutboundNames().catch(() => ({
+      success: false as const,
+      error: '',
+    })),
+  ]);
 
   if (!clashProxies.success) {
     return {
@@ -25,6 +33,26 @@ export async function getDashboardSections(): Promise<IGetDashboardSectionsRespo
       value,
     }),
   );
+
+  // Outbound names are URL fragments of the links the backend created the outbounds from.
+  // Links from subscriptions are not in the config, so the names can't be taken from the section.
+  const outboundNames = outboundNamesResponse.success
+    ? outboundNamesResponse.data
+    : {};
+  // The whole fragment is the name: it may contain '#' itself
+  const getOutboundName = (code: string) => {
+    const name = outboundNames[code];
+
+    if (!name) {
+      return '';
+    }
+
+    try {
+      return decodeURIComponent(name);
+    } catch {
+      return name;
+    }
+  };
 
   const data = configSections
     .filter(
@@ -43,7 +71,10 @@ export async function getDashboardSections(): Promise<IGetDashboardSectionsRespo
           const activeConfigs = splitProxyString(section.proxy_string);
 
           const proxyDisplayName =
-            getProxyUrlName(activeConfigs?.[0]) || outbound?.value?.name || '';
+            getProxyUrlName(activeConfigs?.[0]) ||
+            getOutboundName(`${section['.name']}-out`) ||
+            outbound?.value?.name ||
+            '';
 
           return {
             withTagSelect: false,
@@ -93,22 +124,15 @@ export async function getDashboardSections(): Promise<IGetDashboardSectionsRespo
             (proxy) => proxy.code === `${section['.name']}-out`,
           );
 
-          const links = section.selector_proxy_links ?? [];
-
-          const outbounds = links
-            .map((link, index) => ({
-              link,
-              outbound: proxies.find(
-                (item) => item.code === `${section['.name']}-${index + 1}-out`,
-              ),
-            }))
+          const outbounds = (selector?.value?.all ?? [])
+            .map((code) => proxies.find((item) => item.code === code))
             .map((item) => ({
-              code: item?.outbound?.code || '',
+              code: item?.code || '',
               displayName:
-                getProxyUrlName(item.link) || item?.outbound?.value?.name || '',
-              latency: item?.outbound?.value?.history?.[0]?.delay || 0,
-              type: item?.outbound?.value?.type || '',
-              selected: selector?.value?.now === item?.outbound?.code,
+                getOutboundName(item?.code || '') || item?.value?.name || '',
+              latency: item?.value?.history?.[0]?.delay || 0,
+              type: item?.value?.type || '',
+              selected: selector?.value?.now === item?.code,
             }));
 
           return {
@@ -126,18 +150,13 @@ export async function getDashboardSections(): Promise<IGetDashboardSectionsRespo
           const outbound = proxies.find(
             (proxy) => proxy.code === `${section['.name']}-urltest-out`,
           );
-          // the group lists its proxy links, then its fallback links
-          const links = [
-            ...(section.urltest_proxy_links ?? []),
-            ...(section.urltest_fallback_links ?? []),
-          ];
 
           const outbounds = (outbound?.value?.all ?? [])
             .map((code) => proxies.find((item) => item.code === code))
-            .map((item, index) => ({
+            .map((item) => ({
               code: item?.code || '',
               displayName:
-                getProxyUrlName(links[index]) || item?.value?.name || '',
+                getOutboundName(item?.code || '') || item?.value?.name || '',
               latency: item?.value?.history?.[0]?.delay || 0,
               type: item?.value?.type || '',
               selected: selector?.value?.now === item?.code,

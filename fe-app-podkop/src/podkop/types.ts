@@ -66,6 +66,7 @@ export namespace Podkop {
     CHECK_LOGS = 'check_logs',
     GET_SYSTEM_INFO = 'get_system_info',
     GET_SING_BOX_FEATURES = 'get_sing_box_features',
+    GET_OUTBOUND_NAMES = 'get_outbound_names',
   }
 
   export enum AvailableClashAPIMethods {

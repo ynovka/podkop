@@ -12,13 +12,34 @@ vi.mock('../../../../helpers', async () => ({
     .splitProxyString,
 }));
 vi.mock('../../shell', () => ({
-  PodkopShellMethods: { getClashApiProxies: vi.fn() },
+  PodkopShellMethods: {
+    getClashApiProxies: vi.fn(),
+    getOutboundNames: vi.fn(),
+  },
 }));
 
 const proxy = (name, extra = {}) => ({ name, history: [], ...extra });
 
+// the backend names an outbound by the fragment of the link it was created from
+function outboundNames(section) {
+  const names = {};
+  const add = (links, prefix) =>
+    (links ?? []).forEach((link, index) => {
+      if (link.includes('#')) {
+        names[`${prefix}-${index + 1}-out`] = link.slice(link.indexOf('#') + 1);
+      }
+    });
+  add(section.urltest_proxy_links, section['.name']);
+  add(section.urltest_fallback_links, `${section['.name']}-fallback`);
+  return names;
+}
+
 function mockUrlTest(section, all) {
   getConfigSections.mockResolvedValue([section]);
+  PodkopShellMethods.getOutboundNames.mockResolvedValue({
+    success: true,
+    data: outboundNames(section),
+  });
   PodkopShellMethods.getClashApiProxies.mockResolvedValue({
     success: true,
     data: {

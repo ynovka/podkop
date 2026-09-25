@@ -4,6 +4,7 @@ import { validateVlessUrl } from './validateVlessUrl';
 import { validateTrojanUrl } from './validateTrojanUrl';
 import { validateSocksUrl } from './validateSocksUrl';
 import { validateHysteria2Url } from './validateHysteriaUrl';
+import { validateUrl } from './validateUrl';
 
 // TODO refactor current validation and add tests
 export function validateProxyUrl(url: string): ValidationResult {
@@ -32,10 +33,15 @@ export function validateProxyUrl(url: string): ValidationResult {
     return validateHysteria2Url(trimmedUrl);
   }
 
+  // Subscription URL: the backend downloads the links it contains
+  if (trimmedUrl.startsWith('https://')) {
+    return validateUrl(trimmedUrl, ['https:']);
+  }
+
   return {
     valid: false,
     message: _(
-      'URL must start with vless://, ss://, trojan://, socks4/5://, or hysteria2://hy2://',
+      'URL must start with vless://, ss://, trojan://, socks4/5://, hysteria2://hy2:// or https://',
     ),
   };
 }

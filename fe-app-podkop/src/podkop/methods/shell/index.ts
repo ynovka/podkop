@@ -86,4 +86,8 @@ export const PodkopShellMethods = {
     ),
   getSingBoxFeatures: async () =>
     callBaseMethod<string[]>(Podkop.AvailableMethods.GET_SING_BOX_FEATURES),
+  getOutboundNames: async () =>
+    callBaseMethod<Record<string, string>>(
+      Podkop.AvailableMethods.GET_OUTBOUND_NAMES,
+    ),
 };

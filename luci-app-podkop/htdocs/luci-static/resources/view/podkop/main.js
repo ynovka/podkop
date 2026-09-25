@@ -557,10 +557,13 @@ function validateProxyUrl(url) {
   if (trimmedUrl.startsWith("hysteria2://") || trimmedUrl.startsWith("hy2://")) {
     return validateHysteria2Url(trimmedUrl);
   }
+  if (trimmedUrl.startsWith("https://")) {
+    return validateUrl(trimmedUrl, ["https:"]);
+  }
   return {
     valid: false,
     message: _(
-      "URL must start with vless://, ss://, trojan://, socks4/5://, or hysteria2://hy2://"
+      "URL must start with vless://, ss://, trojan://, socks4/5://, hysteria2://hy2:// or https://"
     )
   };
 }
@@ -573,6 +576,24 @@ function parseValueList(value) {
 // src/podkop/methods/custom/getConfigSections.ts
 async function getConfigSections() {
   return uci.load("podkop").then(() => uci.sections("podkop"));
+}
+
+// src/helpers/getProxyUrlName.ts
+function getProxyUrlName(url) {
+  try {
+    const [_link, hash] = url.split("#");
+    if (!hash) {
+      return "";
+    }
+    return decodeURIComponent(hash);
+  } catch {
+    return "";
+  }
+}
+
+// src/helpers/splitProxyString.ts
+function splitProxyString(str) {
+  return str.split("\n").map((line) => line.trim()).filter((line) => !line.startsWith("//")).filter(Boolean);
 }
 
 // src/podkop/methods/shell/callBaseMethod.ts
@@ -623,6 +644,7 @@ var Podkop;
     AvailableMethods2["CHECK_LOGS"] = "check_logs";
     AvailableMethods2["GET_SYSTEM_INFO"] = "get_system_info";
     AvailableMethods2["GET_SING_BOX_FEATURES"] = "get_sing_box_features";
+    AvailableMethods2["GET_OUTBOUND_NAMES"] = "get_outbound_names";
   })(AvailableMethods = Podkop2.AvailableMethods || (Podkop2.AvailableMethods = {}));
   let AvailableClashAPIMethods;
   ((AvailableClashAPIMethods2) => {
@@ -698,13 +720,23 @@ var PodkopShellMethods = {
   getSystemInfo: async () => callBaseMethod(
     Podkop.AvailableMethods.GET_SYSTEM_INFO
   ),
-  getSingBoxFeatures: async () => callBaseMethod(Podkop.AvailableMethods.GET_SING_BOX_FEATURES)
+  getSingBoxFeatures: async () => callBaseMethod(Podkop.AvailableMethods.GET_SING_BOX_FEATURES),
+  getOutboundNames: async () => callBaseMethod(
+    Podkop.AvailableMethods.GET_OUTBOUND_NAMES
+  )
 };
 
 // src/podkop/methods/custom/getDashboardSections.ts
 async function getDashboardSections() {
   const configSections = await getConfigSections();
-  const clashProxies = await PodkopShellMethods.getClashApiProxies();
+  const [clashProxies, outboundNamesResponse] = await Promise.all([
+    PodkopShellMethods.getClashApiProxies(),
+    // Names are optional: the dashboard falls back to proxy names without them
+    PodkopShellMethods.getOutboundNames().catch(() => ({
+      success: false,
+      error: ""
+    }))
+  ]);
   if (!clashProxies.success) {
     return {
       success: false,
@@ -717,6 +749,18 @@ async function getDashboardSections() {
       value
     })
   );
+  const outboundNames = outboundNamesResponse.success ? outboundNamesResponse.data : {};
+  const getOutboundName = (code) => {
+    const name = outboundNames[code];
+    if (!name) {
+      return "";
+    }
+    try {
+      return decodeURIComponent(name);
+    } catch {
+      return name;
+    }
+  };
   const data = configSections.filter(
     (section) => section.connection_type !== "block" && section.connection_type !== "exclusion" && section[".type"] !== "settings"
   ).map((section) => {
@@ -726,7 +770,7 @@ async function getDashboardSections() {
           (proxy) => proxy.code === `${section[".name"]}-out`
         );
         const activeConfigs = splitProxyString(section.proxy_string);
-        const proxyDisplayName = getProxyUrlName(activeConfigs?.[0]) || outbound?.value?.name || "";
+        const proxyDisplayName = getProxyUrlName(activeConfigs?.[0]) || getOutboundName(`${section[".name"]}-out`) || outbound?.value?.name || "";
         return {
           withTagSelect: false,
           code: outbound?.code || section[".name"],
@@ -768,18 +812,12 @@ async function getDashboardSections() {
         const selector = proxies.find(
           (proxy) => proxy.code === `${section[".name"]}-out`
         );
-        const links = section.selector_proxy_links ?? [];
-        const outbounds = links.map((link, index) => ({
-          link,
-          outbound: proxies.find(
-            (item) => item.code === `${section[".name"]}-${index + 1}-out`
-          )
-        })).map((item) => ({
-          code: item?.outbound?.code || "",
-          displayName: getProxyUrlName(item.link) || item?.outbound?.value?.name || "",
-          latency: item?.outbound?.value?.history?.[0]?.delay || 0,
-          type: item?.outbound?.value?.type || "",
-          selected: selector?.value?.now === item?.outbound?.code
+        const outbounds = (selector?.value?.all ?? []).map((code) => proxies.find((item) => item.code === code)).map((item) => ({
+          code: item?.code || "",
+          displayName: getOutboundName(item?.code || "") || item?.value?.name || "",
+          latency: item?.value?.history?.[0]?.delay || 0,
+          type: item?.value?.type || "",
+          selected: selector?.value?.now === item?.code
         }));
         return {
           withTagSelect: true,
@@ -795,13 +833,9 @@ async function getDashboardSections() {
         const outbound = proxies.find(
           (proxy) => proxy.code === `${section[".name"]}-urltest-out`
         );
-        const links = [
-          ...section.urltest_proxy_links ?? [],
-          ...section.urltest_fallback_links ?? []
-        ];
-        const outbounds = (outbound?.value?.all ?? []).map((code) => proxies.find((item) => item.code === code)).map((item, index) => ({
+        const outbounds = (outbound?.value?.all ?? []).map((code) => proxies.find((item) => item.code === code)).map((item) => ({
           code: item?.code || "",
-          displayName: getProxyUrlName(links[index]) || item?.value?.name || "",
+          displayName: getOutboundName(item?.code || "") || item?.value?.name || "",
           latency: item?.value?.history?.[0]?.delay || 0,
           type: item?.value?.type || "",
           selected: selector?.value?.now === item?.code
@@ -4812,19 +4846,6 @@ function maskIP(ip = "") {
   return ip.replace(ipv4Regex, (_match, _p1, _p2, _p3, p4) => `XX.XX.XX.${p4}`);
 }
 
-// src/helpers/getProxyUrlName.ts
-function getProxyUrlName(url) {
-  try {
-    const [_link, hash] = url.split("#");
-    if (!hash) {
-      return "";
-    }
-    return decodeURIComponent(hash);
-  } catch {
-    return "";
-  }
-}
-
 // src/helpers/onMount.ts
 async function onMount(id) {
   return new Promise((resolve) => {
@@ -4861,11 +4882,6 @@ function getClashWsUrl() {
 function getClashUIUrl() {
   const { hostname } = window.location;
   return `http://${hostname}:9090/ui`;
-}
-
-// src/helpers/splitProxyString.ts
-function splitProxyString(str) {
-  return str.split("\n").map((line) => line.trim()).filter((line) => !line.startsWith("//")).filter(Boolean);
 }
 
 // src/helpers/preserveScrollForPage.ts

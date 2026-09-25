@@ -1,15 +1,15 @@
 # SOME DESCRIPTIVE TITLE.
 # Copyright (C) 2026 THE PACKAGE'S COPYRIGHT HOLDER
 # This file is distributed under the same license as the PODKOP package.
-# divocatt <210179590+divocatt@users.noreply.github.com>, 2026.
+# Evgeniy Kramsakov <home>, 2026.
 #, fuzzy
 msgid ""
 msgstr ""
 "Project-Id-Version: PODKOP\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-29 13:40+0300\n"
-"PO-Revision-Date: 2026-05-29 13:40+0300\n"
-"Last-Translator: divocatt <210179590+divocatt@users.noreply.github.com>\n"
+"POT-Creation-Date: 2026-10-18 10:55+0300\n"
+"PO-Revision-Date: 2026-10-18 10:55+0300\n"
+"Last-Translator: Evgeniy Kramsakov <home>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
 "Language: \n"
 "MIME-Version: 1.0\n"
@@ -377,7 +377,7 @@ msgstr ""
 msgid "Fallback URLs"
 msgstr ""
 
-#: src/podkop/methods/custom/getDashboardSections.ts:153
+#: src/podkop/methods/custom/getDashboardSections.ts:172
 #: src/podkop/tabs/diagnostic/checks/runSectionsCheck.ts:59
 msgid "Fastest"
 msgstr ""
@@ -1042,8 +1042,8 @@ msgstr ""
 msgid "Uplink"
 msgstr ""
 
-#: src/validators/validateProxyUrl.ts:37
-msgid "URL must start with vless://, ss://, trojan://, socks4/5://, or hysteria2://hy2://"
+#: src/validators/validateProxyUrl.ts:43
+msgid "URL must start with vless://, ss://, trojan://, socks4/5://, hysteria2://hy2:// or https://"
 msgstr ""
 
 #: src/validators/validateUrl.ts:17
@@ -1130,9 +1130,12 @@ msgid "Visit Wiki"
 msgstr ""
 
 #: ../luci-app-podkop/htdocs/luci-static/resources/view/podkop/section.js:37
+msgid "vless://, ss://, trojan://, socks4/5://, hy2/hysteria2:// link or https:// subscription URL (the first supported link from the subscription is used)"
+msgstr ""
+
 #: ../luci-app-podkop/htdocs/luci-static/resources/view/podkop/section.js:89
 #: ../luci-app-podkop/htdocs/luci-static/resources/view/podkop/section.js:112
-msgid "vless://, ss://, trojan://, socks4/5://, hy2/hysteria2:// links"
+msgid "vless://, ss://, trojan://, socks4/5://, hy2/hysteria2:// links or https:// subscription URLs (all supported links from a subscription are added)"
 msgstr ""
 
 #: ../luci-app-podkop/htdocs/luci-static/resources/view/podkop/section.js:400
