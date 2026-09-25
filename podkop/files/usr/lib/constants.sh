@@ -9,6 +9,7 @@ CHECK_PROXY_IP_DOMAIN="ip.podkop.fyi"
 FAKEIP_TEST_DOMAIN="fakeip.podkop.fyi"
 TMP_SING_BOX_FOLDER="/tmp/sing-box"
 TMP_RULESET_FOLDER="$TMP_SING_BOX_FOLDER/rulesets"
+OUTBOUND_NAMES_FILE="$TMP_SING_BOX_FOLDER/outbound_names.json"
 CLOUDFLARE_OCTETS="8.47 162.159 188.114" # Endpoints https://github.com/ampetelin/warp-endpoint-checker
 JQ_REQUIRED_VERSION="1.7.1"
 COREUTILS_BASE64_REQUIRED_VERSION="9.7"
@@ -66,3 +67,9 @@ SUBNETS_OVH="${GITHUB_RAW_URL}/Subnets/IPv4/ovh.lst"
 SUBNETS_DIGITALOCEAN="${GITHUB_RAW_URL}/Subnets/IPv4/digitalocean.lst"
 SUBNETS_CLOUDFRONT="${GITHUB_RAW_URL}/Subnets/IPv4/cloudfront.lst"
 COMMUNITY_SERVICES="russia_inside russia_outside ukraine_inside geoblock block porn news anime youtube hdrezka tiktok google_ai google_play hodca discord meta twitter cloudflare cloudfront digitalocean hetzner ovh telegram roblox"
+
+## Subscriptions
+SUBSCRIPTION_CACHE_FOLDER="/etc/podkop/subscriptions"
+SUBSCRIPTION_USER_AGENT="podkop/$PODKOP_VERSION"
+SUBSCRIPTION_UPDATE_PID_FILE="/var/run/podkop_subscription_update.pid"
+SUBSCRIPTION_UPDATE_LOCK_FILE="/var/lock/podkop_subscription_update.lock"

@@ -20,6 +20,7 @@ check_required_file "$PODKOP_LIB/sing_box_config_manager.sh"
 check_required_file "$PODKOP_LIB/sing_box_config_facade.sh"
 check_required_file "$PODKOP_LIB/logging.sh"
 check_required_file "$PODKOP_LIB/rulesets.sh"
+check_required_file "$PODKOP_LIB/subscriptions.sh"
 . /lib/functions.sh
 . /lib/config/uci.sh
 . /lib/functions/network.sh
@@ -30,6 +31,7 @@ check_required_file "$PODKOP_LIB/rulesets.sh"
 . "$PODKOP_LIB/sing_box_config_facade.sh"
 . "$PODKOP_LIB/logging.sh"
 . "$PODKOP_LIB/rulesets.sh"
+. "$PODKOP_LIB/subscriptions.sh"
 
 config_load "$PODKOP_CONFIG"
 
@@ -126,6 +128,14 @@ start_main() {
     mkdir -p "$TMP_SING_BOX_FOLDER"
     mkdir -p "$TMP_RULESET_FOLDER"
 
+    # Subscriptions without a cache are downloaded before the nft rules are created, while the traffic still goes
+    # directly. Cached subscriptions are used right away and updated in the background once sing-box is running:
+    # the router's DNS points to sing-box, so a slow download here would prolong the DNS outage.
+    subscriptions_fetch_failed=0
+    subscriptions_skipped=0
+    subscriptions_refresh uncached
+    check_proxy_links_available
+
     # base
     route_table_rule_mark
     create_nft_rules
@@ -139,6 +149,11 @@ start_main() {
     log "Nice"
     list_update &
     echo $! > /var/run/podkop_list_update.pid
+
+    if [ "$subscriptions_fetch_failed" -eq 1 ] || [ "$subscriptions_skipped" -eq 1 ]; then
+        subscription_update_background &
+        echo $! > "$SUBSCRIPTION_UPDATE_PID_FILE"
+    fi
 }
 
 stop_main() {
@@ -151,6 +166,15 @@ stop_main() {
             log "Stopped list_update"
         fi
         rm -f /var/run/podkop_list_update.pid
+    fi
+
+    if [ -f "$SUBSCRIPTION_UPDATE_PID_FILE" ]; then
+        pid=$(cat "$SUBSCRIPTION_UPDATE_PID_FILE")
+        if kill -0 "$pid" 2> /dev/null; then
+            kill "$pid" 2> /dev/null
+            log "Stopped the background subscription update"
+        fi
+        rm -f "$SUBSCRIPTION_UPDATE_PID_FILE"
     fi
 
     remove_cron_job
@@ -434,27 +458,29 @@ dnsmasq_restore() {
 
 add_cron_job() {
     ## Future: make a check so that it doesn't recreate many times
-    local community_lists remote_domain_lists remote_subnet_lists update_interval
+    local section="$1"
+    local community_lists remote_domain_lists remote_subnet_lists update_interval cron_schedule
     config_get community_lists "$section" "community_lists"
     config_get remote_domain_lists "$section" "remote_domain_lists"
     config_get remote_subnet_lists "$section" "remote_subnet_lists"
     config_get update_interval "settings" "update_interval"
 
+    # Schedule without the minute field
     case "$update_interval" in
     "1h")
-        cron_job="13 * * * * /usr/bin/podkop list_update"
+        cron_schedule="* * * *"
         ;;
     "3h")
-        cron_job="13 */3 * * * /usr/bin/podkop list_update"
+        cron_schedule="*/3 * * *"
         ;;
     "12h")
-        cron_job="13 */12 * * * /usr/bin/podkop list_update"
+        cron_schedule="*/12 * * *"
         ;;
     "1d")
-        cron_job="13 9 * * * /usr/bin/podkop list_update"
+        cron_schedule="9 * * *"
         ;;
     "3d")
-        cron_job="13 9 */3 * * /usr/bin/podkop list_update"
+        cron_schedule="9 */3 * *"
         ;;
     *)
         log "Invalid update_interval value: $update_interval"
@@ -465,17 +491,36 @@ add_cron_job() {
     if [ -n "$community_lists" ] ||
         [ -n "$remote_domain_lists" ] ||
         [ -n "$remote_subnet_lists" ]; then
-        remove_cron_job
-        crontab -l | {
-            cat
-            echo "$cron_job"
-        } | crontab -
-        log "The cron job has been created: $cron_job"
+        _add_cron_job_line "13 $cron_schedule /usr/bin/podkop list_update" "/usr/bin/podkop list_update"
+    fi
+
+    if [ -n "$(get_section_subscription_urls "$section")" ]; then
+        _add_cron_job_line "43 $cron_schedule /usr/bin/podkop subscription_update" \
+            "/usr/bin/podkop subscription_update"
     fi
 }
 
+_add_cron_job_line() {
+    local cron_job="$1"
+    local command="$2"
+
+    remove_cron_job_by_command "$command"
+    crontab -l | {
+        cat
+        echo "$cron_job"
+    } | crontab -
+    log "The cron job has been created: $cron_job"
+}
+
+remove_cron_job_by_command() {
+    local command="$1"
+
+    (crontab -l | grep -v "$command") | crontab -
+}
+
 remove_cron_job() {
-    (crontab -l | grep -v "/usr/bin/podkop list_update") | crontab -
+    remove_cron_job_by_command "/usr/bin/podkop list_update"
+    remove_cron_job_by_command "/usr/bin/podkop subscription_update"
     log "The cron job removed"
 }
 
@@ -547,6 +592,272 @@ list_update() {
     fi
 }
 
+# Subscription funcs
+
+# Prints the proxy links of the section's active proxy configuration type, one per line
+get_section_raw_proxy_links() {
+    local section="$1"
+
+    local proxy_config_type proxy_string links link
+    config_get proxy_config_type "$section" "proxy_config_type"
+    case "$proxy_config_type" in
+    url)
+        config_get proxy_string "$section" "proxy_string"
+        printf '%s\n' "$proxy_string" | _subscription_normalize
+        ;;
+    selector | urltest)
+        config_get links "$section" "${proxy_config_type}_proxy_links"
+        for link in $links; do
+            printf '%s\n' "$link"
+        done
+        ;;
+    esac
+}
+
+# Prints the proxy links of the section with subscription URLs replaced by their cached links, one per line
+get_section_proxy_links() {
+    local section="$1"
+
+    local link cache_file
+    get_section_raw_proxy_links "$section" | while IFS= read -r link; do
+        if is_subscription_url "$link"; then
+            cache_file="$(subscription_cache_path "$link")"
+            [ -f "$cache_file" ] && cat "$cache_file"
+        else
+            printf '%s\n' "$link"
+        fi
+    done
+}
+
+# Prints the subscription URLs used by the section, one per line
+get_section_subscription_urls() {
+    local section="$1"
+
+    local connection_type link
+    config_get connection_type "$section" "connection_type"
+    [ "$connection_type" = "proxy" ] || return 0
+
+    get_section_raw_proxy_links "$section" | while IFS= read -r link; do
+        if is_subscription_url "$link"; then
+            printf '%s\n' "$link"
+        fi
+    done
+}
+
+# Checks that sing-box accepts the outbounds created from the links in the file
+_subscription_check_links() {
+    local links_file="$1"
+
+    local config='{"outbounds":[]}'
+    local link new_config check_file i=1 rc
+    while IFS= read -r link <&5; do
+        if ! new_config="$(sing_box_cf_add_proxy_outbound "$config" "subscription-check-$i" "$link" "")" ||
+            [ -z "$new_config" ]; then
+            return 1
+        fi
+        config="$new_config"
+        i=$((i + 1))
+    done 5< "$links_file"
+
+    check_file="$(mktemp)"
+    sing_box_cm_save_config_to_file "$config" "$check_file"
+    sing-box -c "$check_file" check > /dev/null 2>&1
+    rc=$?
+    rm -f "$check_file"
+
+    return $rc
+}
+
+#######################################
+# Keep only the links from which sing-box outbounds can be created, so that one bad link in a subscription can't
+# break the whole configuration. The links are checked one by one only if checking them all at once fails, since
+# every sing-box check is expensive on a router.
+# Arguments:
+#   links_file: path to the links, one per line
+#   valid_file: path to save the valid links to
+# Returns:
+#   0 if at least one link is valid, 1 otherwise
+#######################################
+subscription_validate_links() {
+    local links_file="$1"
+    local valid_file="$2"
+
+    if _subscription_check_links "$links_file"; then
+        cp "$links_file" "$valid_file"
+        return 0
+    fi
+
+    local link link_file
+    link_file="$(mktemp)"
+    : > "$valid_file"
+    while IFS= read -r link <&4; do
+        printf '%s\n' "$link" > "$link_file"
+        if _subscription_check_links "$link_file"; then
+            printf '%s\n' "$link" >> "$valid_file"
+        else
+            log "Subscription: skipped a link that sing-box does not accept" "warn"
+        fi
+    done 4< "$links_file"
+    rm -f "$link_file"
+
+    [ -s "$valid_file" ]
+}
+
+# Downloads a subscription and saves the links sing-box accepts to its cache file
+_subscription_update_cache() {
+    local url="$1"
+    local cache_file="$2"
+    local bootstrap_dns_server="$3"
+    local attempts="$4"
+
+    local body_file parsed_file valid_file rc=1
+    body_file="$(mktemp)"
+    parsed_file="$(mktemp)"
+    valid_file="$(mktemp)"
+
+    if subscription_fetch "$url" "$body_file" "$bootstrap_dns_server" "$attempts" &&
+        subscription_parse "$body_file" "$parsed_file"; then
+        # sing-box checks only changed links
+        if [ -f "$cache_file" ] && [ "$(md5sum < "$parsed_file")" = "$(md5sum < "$cache_file")" ]; then
+            rc=0
+        elif subscription_validate_links "$parsed_file" "$valid_file" &&
+            subscription_store_cache "$valid_file" "$cache_file"; then
+            rc=0
+        fi
+    fi
+
+    rm -f "$body_file" "$parsed_file" "$valid_file"
+    return $rc
+}
+
+#######################################
+# Download the subscriptions used by the proxy sections and update their cache. Cache files of subscriptions that
+# are no longer used are removed.
+# Arguments:
+#   mode: "uncached" to download only the subscriptions that have no cache yet (optional)
+# Globals:
+#   subscriptions_fetch_failed: set to 1 if any subscription could not be downloaded
+#   subscriptions_skipped: set to 1 if any cached subscription was not downloaded in the "uncached" mode
+#######################################
+subscriptions_refresh() {
+    local mode="$1"
+
+    local urls_file cached_files_file bootstrap_dns_server url host cache_file attempts
+    urls_file="$(mktemp)"
+    cached_files_file="$(mktemp)"
+    config_get bootstrap_dns_server "settings" "bootstrap_dns_server" "77.88.8.8"
+
+    config_foreach get_section_subscription_urls "section" | sed 's/#.*//' | sort -u > "$urls_file"
+
+    while IFS= read -r url <&3; do
+        host="$(subscription_url_get_host "$url")"
+        cache_file="$(subscription_cache_path "$url")"
+        echo "$cache_file" >> "$cached_files_file"
+
+        if [ "$mode" = "uncached" ] && [ -f "$cache_file" ]; then
+            subscriptions_skipped=1
+            continue
+        fi
+
+        # Without a cache the section can't be configured, so try harder
+        attempts=4
+        [ -f "$cache_file" ] && attempts=1
+
+        if _subscription_update_cache "$url" "$cache_file" "$bootstrap_dns_server" "$attempts"; then
+            log "Subscription from $host has been updated: $(grep -c . "$cache_file") links"
+        elif [ -f "$cache_file" ]; then
+            subscriptions_fetch_failed=1
+            log "Failed to update subscription from $host. Cached links will be used" "warn"
+        else
+            subscriptions_fetch_failed=1
+            log "Failed to update subscription from $host. No cached links available" "error"
+        fi
+    done 3< "$urls_file"
+
+    if [ -d "$SUBSCRIPTION_CACHE_FOLDER" ]; then
+        for cache_file in "$SUBSCRIPTION_CACHE_FOLDER"/*.txt; do
+            [ -f "$cache_file" ] || continue
+            if ! grep -qxF "$cache_file" "$cached_files_file"; then
+                log "Removing the cache of an unused subscription: $cache_file" "debug"
+                rm -f "$cache_file"
+            fi
+        done
+    fi
+
+    rm -f "$urls_file" "$cached_files_file"
+}
+
+_check_section_proxy_links_available() {
+    local section="$1"
+
+    local connection_type proxy_config_type
+    config_get connection_type "$section" "connection_type"
+    config_get proxy_config_type "$section" "proxy_config_type"
+    [ "$connection_type" = "proxy" ] || return 0
+
+    case "$proxy_config_type" in
+    url | selector | urltest)
+        if [ -z "$(get_section_proxy_links "$section")" ]; then
+            log "No proxy links available for the $section section. Check the proxy links and subscriptions. Aborted." "fatal"
+            exit 1
+        fi
+        ;;
+    esac
+}
+
+# Aborts if any proxy section has no links, e.g. its subscription could not be downloaded and has no cache
+check_proxy_links_available() {
+    config_foreach _check_section_proxy_links_available "section"
+}
+
+# Updates subscriptions and applies changed links to the running sing-box
+subscription_update() {
+    exec 9> "$SUBSCRIPTION_UPDATE_LOCK_FILE"
+    if ! flock -n 9; then
+        log "Subscription update is already running" "debug"
+        return 0
+    fi
+
+    log "Updating subscriptions"
+    subscriptions_refresh
+
+    if ! nft list table inet "$NFT_TABLE_NAME" > /dev/null 2>&1; then
+        log "Podkop is not running. Only the subscription cache has been updated" "debug"
+        return 0
+    fi
+
+    sing_box_update_outbounds
+}
+
+# Updates subscriptions in the background after startup, retrying on failure
+subscription_update_background() {
+    local attempts=5
+    local delay=60
+    local i
+
+    for i in $(seq 1 $attempts); do
+        subscriptions_fetch_failed=0
+        subscription_update
+        if [ "$subscriptions_fetch_failed" -eq 0 ]; then
+            break
+        fi
+        log "Subscription update attempt $i/$attempts failed" "warn"
+        if [ "$i" -lt "$attempts" ]; then
+            sleep $delay
+        fi
+    done
+
+    rm -f "$SUBSCRIPTION_UPDATE_PID_FILE"
+}
+
+get_outbound_names() {
+    if [ -f "$OUTBOUND_NAMES_FILE" ]; then
+        cat "$OUTBOUND_NAMES_FILE"
+    else
+        echo '{}'
+    fi
+}
+
 # sing-box funcs
 sing_box_configure_service() {
     local sing_box_enabled sing_box_user sing_box_config_path sing_box_conffile
@@ -589,6 +900,40 @@ sing_box_init_config() {
     sing_box_configure_experimental
     sing_box_additional_inbounds
     sing_box_save_config
+    sing_box_save_outbound_names
+}
+
+#######################################
+# Rebuild only the outbounds of the current sing-box configuration and restart sing-box if they have changed.
+# The whole configuration can't be regenerated while podkop is running: source rule sets that already exist
+# would be skipped. The rest of the configuration refers to outbounds only by section tags, which do not change.
+#######################################
+sing_box_update_outbounds() {
+    local sing_box_config_path hash_before hash_after outbounds_file
+    config_get sing_box_config_path "settings" "config_path"
+    hash_before=$(md5sum "$sing_box_config_path" 2> /dev/null | awk '{print $1}')
+
+    local config='{"dns":{},"outbounds":[]}'
+    sing_box_configure_outbounds
+
+    # Passed as a file: a large subscription exceeds the size limit of a command line argument
+    outbounds_file="$(mktemp)"
+    echo "$config" | jq -c '.outbounds' > "$outbounds_file"
+    config="$(jq -c --slurpfile outbounds "$outbounds_file" '.outbounds = $outbounds[0]' "$sing_box_config_path")"
+    rm -f "$outbounds_file"
+    sing_box_save_config
+    sing_box_save_outbound_names
+
+    hash_after=$(md5sum "$sing_box_config_path" | awk '{print $1}')
+    if [ "$hash_before" != "$hash_after" ]; then
+        log "Outbounds have changed. Restarting sing-box"
+        /etc/init.d/sing-box restart
+    fi
+}
+
+# Saves the outbound display names collected while configuring outbounds (used by the LuCI dashboard)
+sing_box_save_outbound_names() {
+    echo "$outbound_names" > "$OUTBOUND_NAMES_FILE"
 }
 
 sing_box_configure_log() {
@@ -616,7 +961,41 @@ sing_box_configure_outbounds() {
 
     config=$(sing_box_cm_add_direct_outbound "$config" "$SB_DIRECT_OUTBOUND_TAG")
 
+    outbound_names='{}'
     config_foreach configure_outbound_handler "section"
+}
+
+#######################################
+# Add an outbound for a proxy link. The config is left unchanged if the outbound can't be created from the link.
+# Globals:
+#   config: sing-box configuration
+#   outbound_names: JSON object with the outbound display names (URL fragments) by tag
+# Arguments:
+#   section: section name used for the outbound tag
+#   link: proxy link
+#   udp_over_tcp: enable UDP over TCP
+# Returns:
+#   0 on success, 1 otherwise
+#######################################
+add_proxy_link_outbound() {
+    local section="$1"
+    local link="$2"
+    local udp_over_tcp="$3"
+
+    local new_config outbound_tag
+    if ! new_config="$(sing_box_cf_add_proxy_outbound "$config" "$section" "$link" "$udp_over_tcp")" ||
+        [ -z "$new_config" ]; then
+        return 1
+    fi
+    config="$new_config"
+
+    case "$link" in
+    *#*)
+        outbound_tag="$(get_outbound_tag_by_section "$section")"
+        outbound_names="$(echo "$outbound_names" |
+            jq -c --arg tag "$outbound_tag" --arg name "${link#*#}" '.[$tag] = $name')"
+        ;;
+    esac
 }
 
 configure_outbound_handler() {
@@ -633,15 +1012,30 @@ configure_outbound_handler() {
         case "$proxy_config_type" in
         url)
             log "Detected proxy configuration type: url" "debug"
-            local proxy_string udp_over_tcp
-            config_get proxy_string "$section" "proxy_string"
+            local proxy_links udp_over_tcp link outbound_added=0
+            proxy_links="$(get_section_proxy_links "$section")"
             config_get udp_over_tcp "$section" "enable_udp_over_tcp"
 
-            if [ -z "$proxy_string" ]; then
+            if [ -z "$proxy_links" ]; then
                 log "Proxy string is not set. Aborted." "fatal"
                 exit 1
             fi
-            config=$(sing_box_cf_add_proxy_outbound "$config" "$section" "$proxy_string" "$udp_over_tcp")
+
+            # A subscription may provide several links: the first valid one is used
+            while IFS= read -r link; do
+                if add_proxy_link_outbound "$section" "$link" "$udp_over_tcp"; then
+                    outbound_added=1
+                    break
+                fi
+                log "Failed to create an outbound from a proxy link of the $section section" "error"
+            done << EOF
+$proxy_links
+EOF
+
+            if [ "$outbound_added" -eq 0 ]; then
+                log "No valid proxy link for the $section section. Aborted." "fatal"
+                exit 1
+            fi
             ;;
         outbound)
             log "Detected proxy configuration type: outbound" "debug"
@@ -651,8 +1045,8 @@ configure_outbound_handler() {
             ;;
         selector)
             log "Detected proxy configuration type: selector" "debug"
-            local selector_proxy_links udp_over_tcp i outbound_tags outbound_tag default_outbound
-            config_get selector_proxy_links "$section" "selector_proxy_links"
+            local selector_proxy_links udp_over_tcp i link outbound_tags outbound_tag default_outbound
+            selector_proxy_links="$(get_section_proxy_links "$section")"
             config_get udp_over_tcp "$section" "enable_udp_over_tcp"
 
             if [ -z "$selector_proxy_links" ]; then
@@ -661,8 +1055,11 @@ configure_outbound_handler() {
             fi
 
             i=1
-            for link in $selector_proxy_links; do
-                config="$(sing_box_cf_add_proxy_outbound "$config" "$section-$i" "$link" "$udp_over_tcp")"
+            while IFS= read -r link; do
+                if ! add_proxy_link_outbound "$section-$i" "$link" "$udp_over_tcp"; then
+                    log "Failed to create an outbound from a proxy link of the $section section. Skipped" "error"
+                    continue
+                fi
                 outbound_tag="$(get_outbound_tag_by_section "$section-$i")"
                 if [ -z "$outbound_tags" ]; then
                     outbound_tags="$outbound_tag"
@@ -671,7 +1068,14 @@ configure_outbound_handler() {
                     outbound_tags="$outbound_tags,$outbound_tag"
                 fi
                 i=$((i + 1))
-            done
+            done << EOF
+$selector_proxy_links
+EOF
+
+            if [ -z "$outbound_tags" ]; then
+                log "No valid proxy links for the $section section. Aborted." "fatal"
+                exit 1
+            fi
 
             selector_tag="$(get_outbound_tag_by_section "$section")"
             selector_outbounds="$(comma_string_to_json_array "$outbound_tags")"
@@ -680,10 +1084,10 @@ configure_outbound_handler() {
             ;;
         urltest)
             log "Detected proxy configuration type: urltest" "debug"
-            local urltest_proxy_links udp_over_tcp i urltest_tag selector_tag outbound_tag outbound_tags \
+            local urltest_proxy_links udp_over_tcp i link urltest_tag selector_tag outbound_tag outbound_tags \
                 urltest_outbounds selector_outbounds urltest_check_interval urltest_tolerance urltest_testing_url \
                 urltest_fallback_links fallback_tags urltest_fallbacks urltest_download_check urltest_download_url
-            config_get urltest_proxy_links "$section" "urltest_proxy_links"
+            urltest_proxy_links="$(get_section_proxy_links "$section")"
             config_get urltest_fallback_links "$section" "urltest_fallback_links"
             config_get udp_over_tcp "$section" "enable_udp_over_tcp"
             config_get urltest_check_interval "$section" "urltest_check_interval" "3m"
@@ -708,8 +1112,11 @@ configure_outbound_handler() {
             fi
 
             i=1
-            for link in $urltest_proxy_links; do
-                config="$(sing_box_cf_add_proxy_outbound "$config" "$section-$i" "$link" "$udp_over_tcp")"
+            while IFS= read -r link; do
+                if ! add_proxy_link_outbound "$section-$i" "$link" "$udp_over_tcp"; then
+                    log "Failed to create an outbound from a proxy link of the $section section. Skipped" "error"
+                    continue
+                fi
                 outbound_tag="$(get_outbound_tag_by_section "$section-$i")"
                 if [ -z "$outbound_tags" ]; then
                     outbound_tags="$outbound_tag"
@@ -717,11 +1124,21 @@ configure_outbound_handler() {
                     outbound_tags="$outbound_tags,$outbound_tag"
                 fi
                 i=$((i + 1))
-            done
+            done << EOF
+$urltest_proxy_links
+EOF
+
+            if [ -z "$outbound_tags" ]; then
+                log "No valid proxy links for the $section section. Aborted." "fatal"
+                exit 1
+            fi
 
             i=1
             for link in $urltest_fallback_links; do
-                config="$(sing_box_cf_add_proxy_outbound "$config" "$section-fallback-$i" "$link" "$udp_over_tcp")"
+                if ! add_proxy_link_outbound "$section-fallback-$i" "$link" "$udp_over_tcp"; then
+                    log "Failed to create an outbound from a fallback link of the $section section. Skipped" "error"
+                    continue
+                fi
                 outbound_tag="$(get_outbound_tag_by_section "$section-fallback-$i")"
                 if [ -z "$fallback_tags" ]; then
                     fallback_tags="$outbound_tag"
@@ -2709,6 +3126,7 @@ Available commands:
     restart                 Restart podkop service
     main                    Run main podkop process
     list_update             Update domain lists
+    subscription_update     Update proxy subscriptions and apply changed links
     check_proxy             Check proxy connectivity
     check_nft               Check NFT rules
     check_nft_rules         Check NFT rules status
@@ -2726,6 +3144,7 @@ Available commands:
     get_sing_box_status     Get sing-box service status
     get_system_info         Get system information in JSON format
     get_sing_box_features   Get the features of the installed sing-box in JSON format
+    get_outbound_names      Get outbound display names in JSON format
     check_dns_available     Check DNS server availability
     global_check            Run global system check
 EOF
@@ -2749,6 +3168,9 @@ main)
     ;;
 list_update)
     list_update
+    ;;
+subscription_update)
+    subscription_update
     ;;
 check_proxy)
     check_proxy
@@ -2800,6 +3222,9 @@ get_system_info)
     ;;
 get_sing_box_features)
     get_sing_box_features
+    ;;
+get_outbound_names)
+    get_outbound_names
     ;;
 check_dns_available)
     check_dns_available
