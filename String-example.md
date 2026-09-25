@@ -117,3 +117,13 @@ hy2://password@example.com:443/?obfs=salamander&obfs-password=obfspassword#hyste
 # All parameters combined
 hy2://mypassword@example.com:8443/?sni=example.com&obfs=salamander&obfs-password=obfspass&insecure=1#hysteria2-all-params
 ```
+
+## HTTPS subscription
+A link that returns vless://, ss://, trojan://, socks4/5:// or hy2/hysteria2:// links, one per line or base64-encoded.
+```
+https://sub.example.com/sub/TOKEN#my-provider
+```
+- In the Connection URL mode the first supported link from the subscription is used. In the Selector and URLTest modes all supported links are added.
+- Links podkop can't use (vmess, tuic, httpupgrade, links rejected by sing-box and others) are skipped. xhttp links are kept only with a sing-box that decodes them (podkop-engine r11 or later).
+- The last successfully downloaded links are kept in `/etc/podkop/subscriptions`. On start podkop uses them right away and updates the subscription in the background; a subscription without saved links is downloaded before start.
+- The subscription is also updated according to the list update interval. sing-box is restarted only if the links have changed.
