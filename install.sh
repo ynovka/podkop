@@ -1,7 +1,7 @@
 #!/bin/sh
 # shellcheck shell=dash
 
-REPO="https://api.github.com/repos/itdoginfo/podkop/releases/latest"
+REPO="https://api.github.com/repos/ynovka/podkop/releases/latest"
 DOWNLOAD_DIR="/tmp/podkop"
 COUNT=3
 
@@ -88,7 +88,7 @@ update_config() {
 
             yes|y|Y)
                 mv /etc/config/podkop /etc/config/podkop-070
-                wget -O /etc/config/podkop https://raw.githubusercontent.com/itdoginfo/podkop/refs/heads/main/podkop/files/etc/config/podkop
+                wget -O /etc/config/podkop https://raw.githubusercontent.com/ynovka/podkop/refs/heads/main/podkop/files/etc/config/podkop
                 msg "Podkop config has been reset to default. Your old config saved in /etc/config/podkop-070"
                 break
                 ;;
@@ -115,7 +115,7 @@ main() {
     fi
 
     if command -v curl >/dev/null 2>&1; then
-        check_response=$(curl -s "https://api.github.com/repos/itdoginfo/podkop/releases/latest")
+        check_response=$(curl -s "https://api.github.com/repos/ynovka/podkop/releases/latest")
 
         if echo "$check_response" | grep -q 'API rate limit '; then
             msg "You've reached the GitHub rate limit. Repeat in five minutes."
