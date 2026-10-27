@@ -119,7 +119,7 @@ hy2://mypassword@example.com:8443/?sni=example.com&obfs=salamander&obfs-password
 ```
 
 ## HTTPS subscription
-A link that returns vless://, ss://, trojan://, socks4/5:// or hy2/hysteria2:// links, one per line or base64-encoded.
+A link that returns vless://, ss://, trojan://, socks4/5:// or hy2/hysteria2:// links, one per line or base64-encoded, or a sing-box configuration (JSON). Proxy outbounds (vless, vmess, trojan, shadowsocks, hysteria2, hysteria, tuic, anytls) of a sing-box configuration are used as they are; groups, direct and block are ignored.
 ```
 https://sub.example.com/sub/TOKEN#my-provider
 ```
@@ -127,3 +127,4 @@ https://sub.example.com/sub/TOKEN#my-provider
 - Links podkop can't use (vmess, tuic, httpupgrade, links rejected by sing-box and others) are skipped. xhttp links are kept only with a sing-box that decodes them (podkop-engine r11 or later).
 - The last successfully downloaded links are kept in `/etc/podkop/subscriptions`. On start podkop uses them right away and updates the subscription in the background; a subscription without saved links is downloaded before start.
 - The subscription is also updated according to the list update interval. sing-box is restarted only if the links have changed.
+- Panels choose the format of the response by the User-Agent. podkop asks as `podkop/<version>`; if the response is not a list of links or a sing-box configuration (an Xray JSON, a web page) or the server rejects the request, it asks again as a sing-box client (`SFA/...`, then `Hiddify/...`). Xray JSON is not supported. To always use a specific User-Agent, run `uci set podkop.settings.subscription_user_agent='Hiddify/2.0' && uci commit podkop`.

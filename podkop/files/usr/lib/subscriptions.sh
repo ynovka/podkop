@@ -58,14 +58,16 @@ subscription_cache_path() {
 #   outfile: path to save the response body to
 #   bootstrap_dns_server: IPv4 address of the DNS server used to resolve the host
 #   attempts: number of download attempts (default: 1)
+#   user_agent: User-Agent header (default: SUBSCRIPTION_USER_AGENT)
 # Returns:
-#   0 on success, 1 otherwise
+#   0 on success, the exit code of the last curl attempt otherwise
 #######################################
 subscription_fetch() {
     local url="$1"
     local outfile="$2"
     local bootstrap_dns_server="$3"
     local attempts="${4:-1}"
+    local user_agent="${5:-$SUBSCRIPTION_USER_AGENT}"
 
     local host port ip attempt rc
     host="$(subscription_url_get_host "$url")"
@@ -82,10 +84,10 @@ subscription_fetch() {
 
         if [ -n "$ip" ]; then
             curl -fsL --proto =https --proto-redir =https --max-filesize 5M --connect-timeout 5 -m 15 \
-                -A "$SUBSCRIPTION_USER_AGENT" --resolve "$host:$port:$ip" -o "$outfile" "$url" 2> /dev/null
+                -A "$user_agent" --resolve "$host:$port:$ip" -o "$outfile" "$url" 2> /dev/null
         else
             curl -fsL --proto =https --proto-redir =https --max-filesize 5M --connect-timeout 5 -m 15 \
-                -A "$SUBSCRIPTION_USER_AGENT" -o "$outfile" "$url" 2> /dev/null
+                -A "$user_agent" -o "$outfile" "$url" 2> /dev/null
         fi
         rc=$?
         [ "$rc" -eq 0 ] && return 0
@@ -95,7 +97,7 @@ subscription_fetch() {
         [ "$attempt" -le "$attempts" ] && sleep 5
     done
 
-    return 1
+    return "$rc"
 }
 
 # Removes CR characters, surrounding whitespace and empty lines
@@ -104,19 +106,60 @@ _subscription_normalize() {
 }
 
 #######################################
-# Parse a subscription response body (plain or base64-encoded list of links) and keep only the links that podkop
-# can turn into sing-box outbounds.
+# Take the proxy outbounds of a sing-box configuration returned by a subscription. Panels return it to sing-box
+# clients instead of a list of links. Every outbound is saved as a one-line JSON object. Groups (selector, urltest),
+# direct, block and the like are skipped, and so are the options that refer to other parts of the original
+# configuration.
 # Arguments:
 #   infile: path to the response body
-#   outfile: path to save the supported links to, one per line
+#   outfile: path to save the outbounds to, one per line
 # Returns:
-#   0 if at least one supported link was found, 1 otherwise
+#   0 if at least one outbound was found, 1 otherwise
+#######################################
+_subscription_parse_singbox() {
+    local infile="$1"
+    local outfile="$2"
+
+    jq -c '
+        (if type == "array" then .[] else . end)
+        | objects
+        | .outbounds[]?
+        | select(
+            type == "object"
+            and (.type | IN("vless", "vmess", "trojan", "shadowsocks", "hysteria2", "hysteria", "tuic", "anytls"))
+            and (.server | type == "string")
+        )
+        | del(.detour, .domain_resolver, .domain_strategy, .bind_interface, .inet4_bind_address,
+              .inet6_bind_address, .routing_mark, .netns)
+    ' "$infile" 2> /dev/null | awk '!seen[$0]++' > "$outfile"
+
+    [ -s "$outfile" ]
+}
+
+#######################################
+# Parse a subscription response body and keep only the proxies that podkop can turn into sing-box outbounds.
+# The body is a plain or base64-encoded list of links, or a sing-box configuration.
+# Arguments:
+#   infile: path to the response body
+#   outfile: path to save the supported proxies to, one per line: a link or a one-line JSON object of an outbound
+# Returns:
+#   0 if at least one supported proxy was found, 1 otherwise
 #######################################
 subscription_parse() {
     local infile="$1"
     local outfile="$2"
 
     local body_file decoded_file encoded total kept
+    case "$(tr -d ' \t\r\n' < "$infile" | head -c 1)" in
+    "{" | "[")
+        if _subscription_parse_singbox "$infile" "$outfile"; then
+            return 0
+        fi
+        log "Subscription: the response is JSON without proxies of a sing-box configuration (Xray and other formats are not supported)" "warn"
+        return 1
+        ;;
+    esac
+
     body_file="$(mktemp)"
     _subscription_normalize < "$infile" > "$body_file"
 
@@ -129,6 +172,7 @@ subscription_parse() {
 
         decoded_file="$(mktemp)"
         if ! printf '%s' "$encoded" | base64 -d > "$decoded_file" 2> /dev/null; then
+            log "Subscription: the response is neither a list of links nor a sing-box configuration" "warn"
             rm -f "$body_file" "$decoded_file"
             return 1
         fi
@@ -213,4 +257,67 @@ subscription_store_cache() {
 
     rm -f "$tmp_file"
     return 1
+}
+
+
+# Downloads a subscription as the given client and parses it. Returns 0 on success, 2 if the response has no
+# supported proxies, the exit code of curl if the download failed.
+_subscription_download_as() {
+    local url="$1"
+    local parsed_file="$2"
+    local bootstrap_dns_server="$3"
+    local attempts="$4"
+    local user_agent="$5"
+
+    local body_file rc
+    body_file="$(mktemp)"
+
+    subscription_fetch "$url" "$body_file" "$bootstrap_dns_server" "$attempts" "$user_agent"
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+        subscription_parse "$body_file" "$parsed_file" || rc=2
+    fi
+
+    rm -f "$body_file"
+    return $rc
+}
+
+#######################################
+# Download a subscription and parse it. Panels choose the format of the response by the User-Agent and give an
+# unknown client something podkop cannot read (a JSON for Xray, a web page) or reject it. Then the subscription is
+# requested again as clients that get a sing-box configuration.
+# Arguments:
+#   url: subscription URL
+#   parsed_file: path to save the supported proxies to (see subscription_parse)
+#   bootstrap_dns_server: IPv4 address of the DNS server used to resolve the host
+#   attempts: number of download attempts
+#   user_agent: User-Agent to use instead of the built-in ones (optional)
+# Returns:
+#   0 if at least one supported proxy was found, 1 otherwise
+#######################################
+subscription_download() {
+    local url="$1"
+    local parsed_file="$2"
+    local bootstrap_dns_server="$3"
+    local attempts="$4"
+    local user_agent="$5"
+
+    local rc
+    if [ -n "$user_agent" ]; then
+        _subscription_download_as "$url" "$parsed_file" "$bootstrap_dns_server" "$attempts" "$user_agent"
+        return $?
+    fi
+
+    _subscription_download_as "$url" "$parsed_file" "$bootstrap_dns_server" "$attempts" "$SUBSCRIPTION_USER_AGENT"
+    rc=$?
+    # 22: the server answered with an HTTP error, e.g. it rejects unknown clients
+    if [ "$rc" -ne 2 ] && [ "$rc" -ne 22 ]; then
+        [ "$rc" -eq 0 ]
+        return
+    fi
+
+    log "Subscription: requesting it again as a sing-box client" "debug"
+    _subscription_download_as "$url" "$parsed_file" "$bootstrap_dns_server" 1 "$SUBSCRIPTION_USER_AGENT_SINGBOX" &&
+        return 0
+    _subscription_download_as "$url" "$parsed_file" "$bootstrap_dns_server" 1 "$SUBSCRIPTION_USER_AGENT_HIDDIFY"
 }

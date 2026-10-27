@@ -61,6 +61,14 @@ sing_box_cf_add_proxy_outbound() {
     local url="$3"
     local udp_over_tcp="$4"
 
+    # An outbound of a sing-box configuration taken from a subscription is used as it is
+    case "$url" in
+    "{"*)
+        sing_box_cm_add_raw_outbound "$config" "$(get_outbound_tag_by_section "$section")" "$url"
+        return
+        ;;
+    esac
+
     # A link with the xhttp transport is decoded by sing-box itself, before any
     # decoding here: its "extra" parameter is URL-encoded JSON
     case "$(url_get_scheme "$url")" in

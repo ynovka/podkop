@@ -710,13 +710,12 @@ _subscription_update_cache() {
     local bootstrap_dns_server="$3"
     local attempts="$4"
 
-    local body_file parsed_file valid_file rc=1
-    body_file="$(mktemp)"
+    local parsed_file valid_file user_agent rc=1
     parsed_file="$(mktemp)"
     valid_file="$(mktemp)"
+    config_get user_agent "settings" "subscription_user_agent"
 
-    if subscription_fetch "$url" "$body_file" "$bootstrap_dns_server" "$attempts" &&
-        subscription_parse "$body_file" "$parsed_file"; then
+    if subscription_download "$url" "$parsed_file" "$bootstrap_dns_server" "$attempts" "$user_agent"; then
         # sing-box checks only changed links
         if [ -f "$cache_file" ] && [ "$(md5sum < "$parsed_file")" = "$(md5sum < "$cache_file")" ]; then
             rc=0
@@ -726,7 +725,7 @@ _subscription_update_cache() {
         fi
     fi
 
-    rm -f "$body_file" "$parsed_file" "$valid_file"
+    rm -f "$parsed_file" "$valid_file"
     return $rc
 }
 
@@ -989,13 +988,18 @@ add_proxy_link_outbound() {
     fi
     config="$new_config"
 
+    # A link is named by its fragment, an outbound of a sing-box configuration by its tag
+    local name=""
     case "$link" in
-    *#*)
+    "{"*) name="$(printf '%s' "$link" | jq -r '.tag // empty')" ;;
+    *#*) name="${link#*#}" ;;
+    esac
+
+    if [ -n "$name" ]; then
         outbound_tag="$(get_outbound_tag_by_section "$section")"
         outbound_names="$(echo "$outbound_names" |
-            jq -c --arg tag "$outbound_tag" --arg name "${link#*#}" '.[$tag] = $name')"
-        ;;
-    esac
+            jq -c --arg tag "$outbound_tag" --arg name "$name" '.[$tag] = $name')"
+    fi
 }
 
 configure_outbound_handler() {
