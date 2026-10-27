@@ -51,6 +51,46 @@ subscription_cache_path() {
 }
 
 #######################################
+# Get the hardware ID (HWID) that is sent to subscription servers. Some panels limit the number of devices of a
+# subscription and require it. The default one is derived from the MAC address of the router, so it stays the same
+# across restarts and updates and does not reveal the address.
+# Arguments:
+#   setting: the subscription_hwid option: empty or "auto" for the default HWID, "off" to send nothing,
+#            anything else is sent as is
+# Outputs:
+#   The HWID, nothing if it is disabled
+#######################################
+subscription_get_hwid() {
+    local setting="$1"
+
+    case "$setting" in
+    off | 0 | false | no | disabled) return 0 ;;
+    "" | auto | 1 | on | true | yes) ;;
+    *)
+        echo "$setting"
+        return 0
+        ;;
+    esac
+
+    local interface address=""
+    for interface in br-lan eth0 lan wan; do
+        [ -r "/sys/class/net/$interface/address" ] && address="$(cat "/sys/class/net/$interface/address")"
+        [ -n "$address" ] && break
+    done
+    if [ -z "$address" ]; then
+        address="$(cat /sys/class/net/*/address 2> /dev/null | grep -v '^00:00:00:00:00:00$' | head -n1)"
+    fi
+    [ -n "$address" ] || return 0
+
+    printf 'podkop:%s' "$address" | md5sum | cut -c1-32
+}
+
+# Prints a value that is safe to send in an HTTP header
+_subscription_header_value() {
+    tr -cd 'A-Za-z0-9 ._()/+-' | cut -c1-64
+}
+
+#######################################
 # Download a subscription URL. The host is resolved via the bootstrap DNS server, because the router's own DNS
 # points to sing-box, which is not running yet while podkop starts.
 # Arguments:
@@ -59,6 +99,7 @@ subscription_cache_path() {
 #   bootstrap_dns_server: IPv4 address of the DNS server used to resolve the host
 #   attempts: number of download attempts (default: 1)
 #   user_agent: User-Agent header (default: SUBSCRIPTION_USER_AGENT)
+#   hwid: HWID to send in the x-hwid header together with the OS and model of the device (optional)
 # Returns:
 #   0 on success, the exit code of the last curl attempt otherwise
 #######################################
@@ -68,11 +109,20 @@ subscription_fetch() {
     local bootstrap_dns_server="$3"
     local attempts="${4:-1}"
     local user_agent="${5:-$SUBSCRIPTION_USER_AGENT}"
+    local hwid="$6"
 
-    local host port ip attempt rc
+    local host port ip attempt rc os_version device_model
     host="$(subscription_url_get_host "$url")"
     port="$(subscription_url_get_port "$url")"
     url="${url%%#*}"
+
+    set -- -fsL --proto =https --proto-redir =https --max-filesize 5M --connect-timeout 5 -m 15 -A "$user_agent"
+    if [ -n "$hwid" ]; then
+        os_version="$(grep DISTRIB_RELEASE /etc/openwrt_release 2> /dev/null | cut -d"'" -f2 | _subscription_header_value)"
+        device_model="$(cat /tmp/sysinfo/model 2> /dev/null | _subscription_header_value)"
+        set -- "$@" -H "x-hwid: $(echo "$hwid" | _subscription_header_value)" -H "x-device-os: OpenWrt" \
+            -H "x-ver-os: $os_version" -H "x-device-model: $device_model"
+    fi
 
     attempt=1
     while [ "$attempt" -le "$attempts" ]; do
@@ -83,11 +133,9 @@ subscription_fetch() {
         fi
 
         if [ -n "$ip" ]; then
-            curl -fsL --proto =https --proto-redir =https --max-filesize 5M --connect-timeout 5 -m 15 \
-                -A "$user_agent" --resolve "$host:$port:$ip" -o "$outfile" "$url" 2> /dev/null
+            curl "$@" --resolve "$host:$port:$ip" -o "$outfile" "$url" 2> /dev/null
         else
-            curl -fsL --proto =https --proto-redir =https --max-filesize 5M --connect-timeout 5 -m 15 \
-                -A "$user_agent" -o "$outfile" "$url" 2> /dev/null
+            curl "$@" -o "$outfile" "$url" 2> /dev/null
         fi
         rc=$?
         [ "$rc" -eq 0 ] && return 0
@@ -268,11 +316,12 @@ _subscription_download_as() {
     local bootstrap_dns_server="$3"
     local attempts="$4"
     local user_agent="$5"
+    local hwid="$6"
 
     local body_file rc
     body_file="$(mktemp)"
 
-    subscription_fetch "$url" "$body_file" "$bootstrap_dns_server" "$attempts" "$user_agent"
+    subscription_fetch "$url" "$body_file" "$bootstrap_dns_server" "$attempts" "$user_agent" "$hwid"
     rc=$?
     if [ "$rc" -eq 0 ]; then
         subscription_parse "$body_file" "$parsed_file" || rc=2
@@ -292,6 +341,7 @@ _subscription_download_as() {
 #   bootstrap_dns_server: IPv4 address of the DNS server used to resolve the host
 #   attempts: number of download attempts
 #   user_agent: User-Agent to use instead of the built-in ones (optional)
+#   hwid: HWID to send to the server (optional, see subscription_get_hwid)
 # Returns:
 #   0 if at least one supported proxy was found, 1 otherwise
 #######################################
@@ -301,14 +351,16 @@ subscription_download() {
     local bootstrap_dns_server="$3"
     local attempts="$4"
     local user_agent="$5"
+    local hwid="$6"
 
     local rc
     if [ -n "$user_agent" ]; then
-        _subscription_download_as "$url" "$parsed_file" "$bootstrap_dns_server" "$attempts" "$user_agent"
+        _subscription_download_as "$url" "$parsed_file" "$bootstrap_dns_server" "$attempts" "$user_agent" "$hwid"
         return $?
     fi
 
-    _subscription_download_as "$url" "$parsed_file" "$bootstrap_dns_server" "$attempts" "$SUBSCRIPTION_USER_AGENT"
+    _subscription_download_as "$url" "$parsed_file" "$bootstrap_dns_server" "$attempts" "$SUBSCRIPTION_USER_AGENT" \
+        "$hwid"
     rc=$?
     # 22: the server answered with an HTTP error, e.g. it rejects unknown clients
     if [ "$rc" -ne 2 ] && [ "$rc" -ne 22 ]; then
@@ -317,7 +369,8 @@ subscription_download() {
     fi
 
     log "Subscription: requesting it again as a sing-box client" "debug"
-    _subscription_download_as "$url" "$parsed_file" "$bootstrap_dns_server" 1 "$SUBSCRIPTION_USER_AGENT_SINGBOX" &&
-        return 0
-    _subscription_download_as "$url" "$parsed_file" "$bootstrap_dns_server" 1 "$SUBSCRIPTION_USER_AGENT_HIDDIFY"
+    _subscription_download_as "$url" "$parsed_file" "$bootstrap_dns_server" 1 "$SUBSCRIPTION_USER_AGENT_SINGBOX" \
+        "$hwid" && return 0
+    _subscription_download_as "$url" "$parsed_file" "$bootstrap_dns_server" 1 "$SUBSCRIPTION_USER_AGENT_HIDDIFY" \
+        "$hwid"
 }

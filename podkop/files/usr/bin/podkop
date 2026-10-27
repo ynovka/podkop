@@ -710,12 +710,14 @@ _subscription_update_cache() {
     local bootstrap_dns_server="$3"
     local attempts="$4"
 
-    local parsed_file valid_file user_agent rc=1
+    local parsed_file valid_file user_agent hwid hwid_setting rc=1
     parsed_file="$(mktemp)"
     valid_file="$(mktemp)"
     config_get user_agent "settings" "subscription_user_agent"
+    config_get hwid_setting "settings" "subscription_hwid"
+    hwid="$(subscription_get_hwid "$hwid_setting")"
 
-    if subscription_download "$url" "$parsed_file" "$bootstrap_dns_server" "$attempts" "$user_agent"; then
+    if subscription_download "$url" "$parsed_file" "$bootstrap_dns_server" "$attempts" "$user_agent" "$hwid"; then
         # sing-box checks only changed links
         if [ -f "$cache_file" ] && [ "$(md5sum < "$parsed_file")" = "$(md5sum < "$cache_file")" ]; then
             rc=0
