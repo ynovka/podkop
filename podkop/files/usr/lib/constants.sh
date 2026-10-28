@@ -74,5 +74,10 @@ SUBSCRIPTION_USER_AGENT="podkop/$PODKOP_VERSION"
 # Clients that panels give a sing-box configuration to
 SUBSCRIPTION_USER_AGENT_SINGBOX="SFA/1.12.0 (sing-box; podkop/$PODKOP_VERSION)"
 SUBSCRIPTION_USER_AGENT_HIDDIFY="Hiddify/2.0 (podkop/$PODKOP_VERSION)"
+SUBSCRIPTION_DEFAULT_UPDATE_INTERVAL="5m"
+# Set when downloaded links are not yet applied to sing-box
+SUBSCRIPTION_PENDING_FILE="/tmp/podkop_subscription_pending"
+# "running <time>", "done" or "failed": the state of the update started from LuCI
+SUBSCRIPTION_UPDATE_STATUS_FILE="/tmp/podkop_subscription_update.status"
 SUBSCRIPTION_UPDATE_PID_FILE="/var/run/podkop_subscription_update.pid"
 SUBSCRIPTION_UPDATE_LOCK_FILE="/var/lock/podkop_subscription_update.lock"

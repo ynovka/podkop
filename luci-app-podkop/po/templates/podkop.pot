@@ -1157,3 +1157,79 @@ msgstr ""
 #: ../luci-app-podkop/htdocs/luci-static/resources/view/podkop/settings.js:127
 msgid "You can select Output Network Interface, by default autodetect"
 msgstr ""
+
+#: ../luci-app-podkop/htdocs/luci-static/resources/view/podkop/settings.js:372
+msgid "Subscription Update Frequency"
+msgstr ""
+
+#: ../luci-app-podkop/htdocs/luci-static/resources/view/podkop/settings.js:374
+msgid "Select how often subscriptions are updated automatically. A change is applied when podkop restarts"
+msgstr ""
+
+#: ../luci-app-podkop/htdocs/luci-static/resources/view/podkop/settings.js:378
+msgid "Every 10 minutes"
+msgstr ""
+
+#: ../luci-app-podkop/htdocs/luci-static/resources/view/podkop/settings.js:379
+msgid "Every 15 minutes"
+msgstr ""
+
+#: ../luci-app-podkop/htdocs/luci-static/resources/view/podkop/settings.js:380
+msgid "Every 30 minutes"
+msgstr ""
+
+#: ../luci-app-podkop/htdocs/luci-static/resources/view/podkop/settings.js:381
+msgid "Every hour"
+msgstr ""
+
+#: ../luci-app-podkop/htdocs/luci-static/resources/view/podkop/settings.js:382
+msgid "Every 3 hours"
+msgstr ""
+
+#: ../luci-app-podkop/htdocs/luci-static/resources/view/podkop/settings.js:383
+msgid "Every 12 hours"
+msgstr ""
+
+#: ../luci-app-podkop/htdocs/luci-static/resources/view/podkop/settings.js:384
+msgid "Every day"
+msgstr ""
+
+#: ../luci-app-podkop/htdocs/luci-static/resources/view/podkop/settings.js:38
+msgid "Subscriptions"
+msgstr ""
+
+#: ../luci-app-podkop/htdocs/luci-static/resources/view/podkop/settings.js:393
+msgid "Download the subscriptions right now and apply the changed servers"
+msgstr ""
+
+#: ../luci-app-podkop/htdocs/luci-static/resources/view/podkop/settings.js:395
+msgid "Update now"
+msgstr ""
+
+#: ../luci-app-podkop/htdocs/luci-static/resources/view/podkop/settings.js:402
+msgid "Subscription cache"
+msgstr ""
+
+#: ../luci-app-podkop/htdocs/luci-static/resources/view/podkop/settings.js:403
+msgid "Remove the saved links of all subscriptions and download them again"
+msgstr ""
+
+#: ../luci-app-podkop/htdocs/luci-static/resources/view/podkop/settings.js:405
+msgid "Clear cache and update"
+msgstr ""
+
+#: ../luci-app-podkop/htdocs/luci-static/resources/view/podkop/settings.js:50
+msgid "Subscriptions have been updated"
+msgstr ""
+
+#: ../luci-app-podkop/htdocs/luci-static/resources/view/podkop/settings.js:43
+msgid "Failed to update subscriptions. See the system log for details."
+msgstr ""
+
+#: ../luci-app-podkop/htdocs/luci-static/resources/view/podkop/settings.js:72
+msgid "The subscription update is running. Try again in a minute."
+msgstr ""
+
+#: ../luci-app-podkop/htdocs/luci-static/resources/view/podkop/settings.js:62
+msgid "Delete the saved subscription links and download them again? If the download fails, podkop will not start until a subscription is downloaded."
+msgstr ""

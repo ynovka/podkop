@@ -50,6 +50,53 @@ subscription_cache_path() {
     echo "$SUBSCRIPTION_CACHE_FOLDER/$hash.txt"
 }
 
+# Returns the path of the file with the checksum of the proxies downloaded for the cache file. The cache holds only
+# the proxies sing-box accepts, so it differs from the download when the subscription has others. The checksum lets
+# the next update skip checking the same download again. It is kept in RAM: after a reboot the check runs once.
+subscription_source_sum_path() {
+    local cache_file="$1"
+
+    echo "$TMP_SING_BOX_FOLDER/subscription_$(basename "$cache_file" .txt).sum"
+}
+
+# Prints the checksum of the lines of a file regardless of their order
+subscription_lines_sum() {
+    sort "$1" | md5sum | cut -c1-32
+}
+
+#######################################
+# Print the cron schedule for updating subscriptions.
+# Arguments:
+#   interval: "<N>m" (1-59), "<N>h" (1-23) or "<N>d" (1-28); the default one if empty
+# Returns:
+#   0 and the five cron fields, 1 if the interval is invalid
+#######################################
+subscription_cron_schedule() {
+    local interval="${1:-$SUBSCRIPTION_DEFAULT_UPDATE_INTERVAL}"
+    local number="${interval%[mhd]}"
+
+    case "$number" in
+    "" | *[!0-9]*) return 1 ;;
+    esac
+    [ "$number" -ge 1 ] || return 1
+
+    case "$interval" in
+    *m)
+        [ "$number" -le 59 ] || return 1
+        echo "*/$number * * * *"
+        ;;
+    *h)
+        [ "$number" -le 23 ] || return 1
+        echo "43 */$number * * *"
+        ;;
+    *d)
+        [ "$number" -le 28 ] || return 1
+        echo "43 9 */$number * *"
+        ;;
+    *) return 1 ;;
+    esac
+}
+
 #######################################
 # Get the hardware ID (HWID) that is sent to subscription servers. Some panels limit the number of devices of a
 # subscription and require it. The default one is derived from the MAC address of the router, so it stays the same

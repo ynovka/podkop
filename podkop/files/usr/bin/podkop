@@ -459,11 +459,13 @@ dnsmasq_restore() {
 add_cron_job() {
     ## Future: make a check so that it doesn't recreate many times
     local section="$1"
-    local community_lists remote_domain_lists remote_subnet_lists update_interval cron_schedule
+    local community_lists remote_domain_lists remote_subnet_lists update_interval cron_schedule \
+        subscription_update_interval subscription_cron
     config_get community_lists "$section" "community_lists"
     config_get remote_domain_lists "$section" "remote_domain_lists"
     config_get remote_subnet_lists "$section" "remote_subnet_lists"
     config_get update_interval "settings" "update_interval"
+    config_get subscription_update_interval "settings" "subscription_update_interval"
 
     # Schedule without the minute field
     case "$update_interval" in
@@ -484,19 +486,23 @@ add_cron_job() {
         ;;
     *)
         log "Invalid update_interval value: $update_interval"
-        return
+        cron_schedule=""
         ;;
     esac
 
-    if [ -n "$community_lists" ] ||
-        [ -n "$remote_domain_lists" ] ||
-        [ -n "$remote_subnet_lists" ]; then
+    if [ -n "$cron_schedule" ] &&
+        { [ -n "$community_lists" ] || [ -n "$remote_domain_lists" ] || [ -n "$remote_subnet_lists" ]; }; then
         _add_cron_job_line "13 $cron_schedule /usr/bin/podkop list_update" "/usr/bin/podkop list_update"
     fi
 
-    if [ -n "$(get_section_subscription_urls "$section")" ]; then
-        _add_cron_job_line "43 $cron_schedule /usr/bin/podkop subscription_update" \
-            "/usr/bin/podkop subscription_update"
+    # Subscriptions are updated on their own schedule
+    if [ -n "$(get_section_subscription_urls "$section")" ] && [ "$subscription_update_interval" != "off" ]; then
+        if subscription_cron="$(subscription_cron_schedule "$subscription_update_interval")"; then
+            _add_cron_job_line "$subscription_cron /usr/bin/podkop subscription_update" \
+                "/usr/bin/podkop subscription_update"
+        else
+            log "Invalid subscription_update_interval value: $subscription_update_interval" "warn"
+        fi
     fi
 }
 
@@ -710,24 +716,54 @@ _subscription_update_cache() {
     local bootstrap_dns_server="$3"
     local attempts="$4"
 
-    local parsed_file valid_file user_agent hwid hwid_setting rc=1
+    local parsed_file valid_file sum_before_file user_agent hwid hwid_setting source_sum sum_file sum_before added
+    local removed rc=1
     parsed_file="$(mktemp)"
     valid_file="$(mktemp)"
+    sum_before_file="$(mktemp)"
     config_get user_agent "settings" "subscription_user_agent"
     config_get hwid_setting "settings" "subscription_hwid"
     hwid="$(subscription_get_hwid "$hwid_setting")"
+    sum_file="$(subscription_source_sum_path "$cache_file")"
 
     if subscription_download "$url" "$parsed_file" "$bootstrap_dns_server" "$attempts" "$user_agent" "$hwid"; then
-        # sing-box checks only changed links
-        if [ -f "$cache_file" ] && [ "$(md5sum < "$parsed_file")" = "$(md5sum < "$cache_file")" ]; then
+        source_sum="$(subscription_lines_sum "$parsed_file")"
+        # Nothing to do if the proxies are the same as the last time, in any order: sing-box checks only changed
+        # proxies, and sing-box is not restarted for a different order of the same proxies
+        if [ -f "$cache_file" ] &&
+            { [ "$source_sum" = "$(subscription_lines_sum "$cache_file")" ] ||
+                [ "$source_sum" = "$(cat "$sum_file" 2> /dev/null)" ]; }; then
             rc=0
-        elif subscription_validate_links "$parsed_file" "$valid_file" &&
-            subscription_store_cache "$valid_file" "$cache_file"; then
-            rc=0
+            log "Subscription from $(subscription_url_get_host "$url") is up to date" "debug"
+        else
+            sum_before=""
+            if [ -f "$cache_file" ]; then
+                sum_before="$(md5sum < "$cache_file")"
+                cp "$cache_file" "$sum_before_file"
+            fi
+            if subscription_validate_links "$parsed_file" "$valid_file" &&
+                subscription_store_cache "$valid_file" "$cache_file"; then
+                rc=0
+                mkdir -p "$(dirname "$sum_file")"
+                echo "$source_sum" > "$sum_file"
+                if [ "$(md5sum < "$cache_file")" != "$sum_before" ]; then
+                    subscriptions_changed=1
+                    touch "$SUBSCRIPTION_PENDING_FILE"
+                    if [ -n "$sum_before" ]; then
+                        added="$(grep -vxFf "$sum_before_file" "$valid_file" | grep -c .)"
+                        removed="$(grep -vxFf "$valid_file" "$sum_before_file" | grep -c .)"
+                        log "Subscription from $(subscription_url_get_host "$url") has been updated: $(grep -c . "$cache_file") links (added $added, removed $removed)"
+                    else
+                        log "Subscription from $(subscription_url_get_host "$url") has been downloaded: $(grep -c . "$cache_file") links"
+                    fi
+                else
+                    log "Subscription from $(subscription_url_get_host "$url") is up to date" "debug"
+                fi
+            fi
         fi
     fi
 
-    rm -f "$parsed_file" "$valid_file"
+    rm -f "$parsed_file" "$valid_file" "$sum_before_file"
     return $rc
 }
 
@@ -738,6 +774,7 @@ _subscription_update_cache() {
 #   mode: "uncached" to download only the subscriptions that have no cache yet (optional)
 # Globals:
 #   subscriptions_fetch_failed: set to 1 if any subscription could not be downloaded
+#   subscriptions_changed: set to 1 if the links of any subscription have changed
 #   subscriptions_skipped: set to 1 if any cached subscription was not downloaded in the "uncached" mode
 #######################################
 subscriptions_refresh() {
@@ -765,8 +802,10 @@ subscriptions_refresh() {
         [ -f "$cache_file" ] && attempts=1
 
         if _subscription_update_cache "$url" "$cache_file" "$bootstrap_dns_server" "$attempts"; then
-            log "Subscription from $host has been updated: $(grep -c . "$cache_file") links"
-        elif [ -f "$cache_file" ]; then
+            continue
+        fi
+
+        if [ -f "$cache_file" ]; then
             subscriptions_fetch_failed=1
             log "Failed to update subscription from $host. Cached links will be used" "warn"
         else
@@ -812,6 +851,8 @@ check_proxy_links_available() {
 }
 
 # Updates subscriptions and applies changed links to the running sing-box
+# Returns:
+#   0 on success, 1 if any subscription could not be downloaded
 subscription_update() {
     exec 9> "$SUBSCRIPTION_UPDATE_LOCK_FILE"
     if ! flock -n 9; then
@@ -819,15 +860,81 @@ subscription_update() {
         return 0
     fi
 
-    log "Updating subscriptions"
+    subscriptions_fetch_failed=0
+    subscriptions_changed=0
+    log "Updating subscriptions" "debug"
     subscriptions_refresh
 
-    if ! nft list table inet "$NFT_TABLE_NAME" > /dev/null 2>&1; then
-        log "Podkop is not running. Only the subscription cache has been updated" "debug"
+    # Links that are downloaded but not applied yet, e.g. if sing-box was not running or the update was aborted
+    if [ -f "$SUBSCRIPTION_PENDING_FILE" ]; then
+        if nft list table inet "$NFT_TABLE_NAME" > /dev/null 2>&1; then
+            sing_box_update_outbounds
+            rm -f "$SUBSCRIPTION_PENDING_FILE"
+        else
+            log "Podkop is not running. Only the subscription cache has been updated" "debug"
+        fi
+    fi
+
+    [ "$subscriptions_fetch_failed" -eq 0 ]
+}
+
+# Runs the update that was started from LuCI and records how it ended
+_subscription_update_job() {
+    echo "running $(date +%s)" > "$SUBSCRIPTION_UPDATE_STATUS_FILE"
+    if subscription_update; then
+        echo "done" > "$SUBSCRIPTION_UPDATE_STATUS_FILE"
+    else
+        echo "failed" > "$SUBSCRIPTION_UPDATE_STATUS_FILE"
+    fi
+}
+
+# Starts the update in the background and returns at once: a request of LuCI is cut off after about 30 seconds,
+# and downloading and checking the links of a big subscription can take longer
+subscription_update_async() {
+    if [ "$(subscription_update_status)" = "running" ]; then
+        echo "running"
         return 0
     fi
 
-    sing_box_update_outbounds
+    echo "running $(date +%s)" > "$SUBSCRIPTION_UPDATE_STATUS_FILE"
+    _subscription_update_job < /dev/null > /dev/null 2>&1 &
+    echo "started"
+}
+
+# Prints the state of the update started from LuCI: idle, running, done or failed
+subscription_update_status() {
+    local status started
+    status="$(cat "$SUBSCRIPTION_UPDATE_STATUS_FILE" 2> /dev/null)"
+
+    case "$status" in
+    running*)
+        started="${status#running }"
+        # A job that has been running for more than 5 minutes has been killed
+        if [ "$(($(date +%s) - ${started:-0}))" -gt 300 ]; then
+            echo "failed"
+        else
+            echo "running"
+        fi
+        ;;
+    done | failed) echo "$status" ;;
+    *) echo "idle" ;;
+    esac
+}
+
+# Removes the saved links of all subscriptions. They are downloaded again by the next update. Until then podkop cannot
+# start if a section has no other links.
+subscription_clear_cache() {
+    exec 9> "$SUBSCRIPTION_UPDATE_LOCK_FILE"
+    if ! flock -n 9; then
+        log "Subscription update is running. The cache has not been cleared" "warn"
+        echo "busy"
+        return 1
+    fi
+
+    rm -f "$SUBSCRIPTION_CACHE_FOLDER"/*.txt "$SUBSCRIPTION_CACHE_FOLDER"/.tmp.* \
+        "$TMP_SING_BOX_FOLDER"/subscription_*.sum "$SUBSCRIPTION_PENDING_FILE" "$SUBSCRIPTION_UPDATE_STATUS_FILE"
+    log "The subscription cache has been cleared"
+    echo "cleared"
 }
 
 # Updates subscriptions in the background after startup, retrying on failure
@@ -3133,6 +3240,9 @@ Available commands:
     main                    Run main podkop process
     list_update             Update domain lists
     subscription_update     Update proxy subscriptions and apply changed links
+    subscription_update_async  Start the subscription update in the background
+    subscription_update_status Get the state of the update started in the background
+    subscription_clear_cache   Remove the saved links of all subscriptions
     check_proxy             Check proxy connectivity
     check_nft               Check NFT rules
     check_nft_rules         Check NFT rules status
@@ -3177,6 +3287,15 @@ list_update)
     ;;
 subscription_update)
     subscription_update
+    ;;
+subscription_update_async)
+    subscription_update_async
+    ;;
+subscription_update_status)
+    subscription_update_status
+    ;;
+subscription_clear_cache)
+    subscription_clear_cache
     ;;
 check_proxy)
     check_proxy

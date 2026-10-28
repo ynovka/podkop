@@ -1,9 +1,82 @@
 "use strict";
 "require form";
 "require uci";
+"require ui";
 "require baseclass";
 "require tools.widgets as widgets";
 "require view.podkop.main as main";
+
+const PODKOP_BIN = "/usr/bin/podkop";
+
+// Runs a podkop command and returns its output
+function runPodkop(args) {
+  return main
+    .executeShellCommand({ command: PODKOP_BIN, args, timeout: 15000 })
+    .then((response) => (response && response.stdout ? response.stdout.trim() : ""))
+    .catch(() => "");
+}
+
+// The update runs in the background on the router: a request of LuCI is cut off after about 30 seconds
+async function waitForSubscriptionUpdate() {
+  // Podkop gives up on an update that takes more than 5 minutes
+  for (let i = 0; i < 150; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    const state = await runPodkop(["subscription_update_status"]);
+
+    if (state !== "running") {
+      return state;
+    }
+  }
+
+  return "failed";
+}
+
+function showSubscriptionNotification(text, type) {
+  ui.addNotification(null, E("p", text), type);
+}
+
+async function updateSubscriptions() {
+  const started = await runPodkop(["subscription_update_async"]);
+
+  if (started !== "started" && started !== "running") {
+    showSubscriptionNotification(
+      _("Failed to update subscriptions. See the system log for details."),
+      "danger",
+    );
+    return;
+  }
+
+  if ((await waitForSubscriptionUpdate()) === "done") {
+    showSubscriptionNotification(_("Subscriptions have been updated"), "info");
+  } else {
+    showSubscriptionNotification(
+      _("Failed to update subscriptions. See the system log for details."),
+      "danger",
+    );
+  }
+}
+
+async function clearSubscriptionCache() {
+  const confirmed = window.confirm(
+    _(
+      "Delete the saved subscription links and download them again? If the download fails, podkop will not start until a subscription is downloaded.",
+    ),
+  );
+
+  if (!confirmed) {
+    return;
+  }
+
+  if ((await runPodkop(["subscription_clear_cache"])) !== "cleared") {
+    showSubscriptionNotification(
+      _("The subscription update is running. Try again in a minute."),
+      "danger",
+    );
+    return;
+  }
+
+  await updateSubscriptions();
+}
 
 function createSettingsContent(section, singBoxFeatures = []) {
   let o = section.option(
@@ -292,6 +365,46 @@ function createSettingsContent(section, singBoxFeatures = []) {
   });
   o.default = "1d";
   o.rmempty = false;
+
+  o = section.option(
+    form.ListValue,
+    "subscription_update_interval",
+    _("Subscription Update Frequency"),
+    _(
+      "Select how often subscriptions are updated automatically. A change is applied when podkop restarts",
+    ),
+  );
+  o.value("5m", _("Every 5 minutes"));
+  o.value("10m", _("Every 10 minutes"));
+  o.value("15m", _("Every 15 minutes"));
+  o.value("30m", _("Every 30 minutes"));
+  o.value("1h", _("Every hour"));
+  o.value("3h", _("Every 3 hours"));
+  o.value("12h", _("Every 12 hours"));
+  o.value("1d", _("Every day"));
+  o.value("off", _("Disabled"));
+  o.default = "5m";
+  o.rmempty = false;
+
+  o = section.option(
+    form.Button,
+    "_update_subscriptions",
+    _("Subscriptions"),
+    _("Download the subscriptions right now and apply the changed servers"),
+  );
+  o.inputtitle = _("Update now");
+  o.inputstyle = "apply";
+  o.onclick = () => updateSubscriptions();
+
+  o = section.option(
+    form.Button,
+    "_clear_subscription_cache",
+    _("Subscription cache"),
+    _("Remove the saved links of all subscriptions and download them again"),
+  );
+  o.inputtitle = _("Clear cache and update");
+  o.inputstyle = "remove";
+  o.onclick = () => clearSubscriptionCache();
 
   o = section.option(
     form.Flag,
