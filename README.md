@@ -45,7 +45,11 @@ sh <(wget -O - https://raw.githubusercontent.com/ynovka/podkop/refs/heads/main/i
 
 Часть возможностей Podkop (например, ссылки и подписки с транспортом xhttp и резервные ссылки в URLTest) работает только с альтернативной сборкой sing-box — [podkop-engine](https://github.com/FiyeroT/podkop-engine) версии r11 или новее. С обычным sing-box эти возможности недоступны, остальное работает как раньше.
 
-Установить podkop-engine можно из его [репозитория](https://github.com/podkop-net/podkop-engine/releases). xhttp работает и с sing-box-extended; обычный sing-box из OpenWrt этот транспорт не поддерживает, такие серверы пропускаются, а в логе указано, сколько их.
+Установщик сам предлагает заменить sing-box на podkop-engine (подходящий файл под архитектуру роутера берётся из последнего релиза [podkop-net/podkop-engine](https://github.com/podkop-net/podkop-engine/releases), контрольная сумма проверяется), если у установленного sing-box нет xhttp. Enter или `y` — установить, `n` — пропустить. Без вопросов:
+```
+PODKOP_ENGINE=yes sh <(wget -O - https://raw.githubusercontent.com/ynovka/podkop/refs/heads/main/install.sh)
+```
+`PODKOP_ENGINE=no` — никогда не ставить. Если что-то пойдёт не так, установщик вернёт sing-box из репозитория OpenWrt. xhttp работает и с sing-box-extended; обычный sing-box из OpenWrt этот транспорт не поддерживает, такие серверы пропускаются, а в логе указано, сколько их.
 
 Альтернативный скрипт оригинального проекта (`bootstrap.sh`) в этой сборке не используется: он ставит оригинальный Podkop без поддержки подписок и заменит эту сборку.
 
