@@ -232,8 +232,28 @@ _subscription_parse_singbox() {
 }
 
 #######################################
+# Turn the Xray JSON that a panel returns for Xray clients into links, see subscription_xray.jq.
+# Arguments:
+#   infile: path to the response body
+#   outfile: path to save the links to, one per line
+# Returns:
+#   0 if at least one link was made, 1 otherwise
+#######################################
+_subscription_parse_xray() {
+    local infile="$1"
+    local outfile="$2"
+
+    jq -r -f "$PODKOP_LIB/subscription_xray.jq" "$infile" 2> /dev/null > "$outfile"
+
+    [ -s "$outfile" ]
+}
+
+#######################################
 # Parse a subscription response body and keep only the proxies that podkop can turn into sing-box outbounds.
-# The body is a plain or base64-encoded list of links, or a sing-box configuration.
+# The body is a plain or base64-encoded list of links, a sing-box configuration or Xray JSON.
+# Globals:
+#   SUBSCRIPTION_PARSED_KIND: "links", "singbox" or "xray", the format of the response
+#   SUBSCRIPTION_XHTTP_SKIPPED: the number of servers skipped because sing-box has no xhttp transport
 # Arguments:
 #   infile: path to the response body
 #   outfile: path to save the supported proxies to, one per line: a link or a one-line JSON object of an outbound
@@ -244,41 +264,54 @@ subscription_parse() {
     local infile="$1"
     local outfile="$2"
 
-    local body_file decoded_file encoded total kept
+    local body_file decoded_file encoded total kept count_file
+    SUBSCRIPTION_PARSED_KIND=""
+    SUBSCRIPTION_XHTTP_SKIPPED=0
+    body_file="$(mktemp)"
+
     case "$(tr -d ' \t\r\n' < "$infile" | head -c 1)" in
     "{" | "[")
         if _subscription_parse_singbox "$infile" "$outfile"; then
+            SUBSCRIPTION_PARSED_KIND="singbox"
+            rm -f "$body_file"
             return 0
         fi
-        log "Subscription: the response is JSON without proxies of a sing-box configuration (Xray and other formats are not supported)" "warn"
-        return 1
+        if ! _subscription_parse_xray "$infile" "$body_file"; then
+            log "Subscription: the response is JSON without proxies of a sing-box or Xray configuration" "warn"
+            rm -f "$body_file"
+            return 1
+        fi
+        SUBSCRIPTION_PARSED_KIND="xray"
+        ;;
+    *)
+        _subscription_normalize < "$infile" > "$body_file"
+
+        if ! grep -qE '^[a-z0-9]+://' "$body_file"; then
+            encoded="$(tr -d ' \t\r\n' < "$infile" | tr '_-' '/+')"
+            case $((${#encoded} % 4)) in
+            2) encoded="$encoded==" ;;
+            3) encoded="$encoded=" ;;
+            esac
+
+            decoded_file="$(mktemp)"
+            if ! printf '%s' "$encoded" | base64 -d > "$decoded_file" 2> /dev/null; then
+                log "Subscription: the response is neither a list of links nor a sing-box configuration" "warn"
+                rm -f "$body_file" "$decoded_file"
+                return 1
+            fi
+            _subscription_normalize < "$decoded_file" > "$body_file"
+            rm -f "$decoded_file"
+        fi
+        SUBSCRIPTION_PARSED_KIND="links"
         ;;
     esac
 
-    body_file="$(mktemp)"
-    _subscription_normalize < "$infile" > "$body_file"
-
-    if ! grep -qE '^[a-z0-9]+://' "$body_file"; then
-        encoded="$(tr -d ' \t\r\n' < "$infile" | tr '_-' '/+')"
-        case $((${#encoded} % 4)) in
-        2) encoded="$encoded==" ;;
-        3) encoded="$encoded=" ;;
-        esac
-
-        decoded_file="$(mktemp)"
-        if ! printf '%s' "$encoded" | base64 -d > "$decoded_file" 2> /dev/null; then
-            log "Subscription: the response is neither a list of links nor a sing-box configuration" "warn"
-            rm -f "$body_file" "$decoded_file"
-            return 1
-        fi
-        _subscription_normalize < "$decoded_file" > "$body_file"
-        rm -f "$decoded_file"
-    fi
-
-    local decode_link=0
+    local decode_link=0 xhttp_ok=0
     sing_box_has_feature "tools.decode-link" && decode_link=1
+    sing_box_supports_xhttp && xhttp_ok=1
+    count_file="$(mktemp)"
 
-    awk -v decode_link="$decode_link" '
+    awk -v decode_link="$decode_link" -v xhttp_ok="$xhttp_ok" -v count_file="$count_file" '
         # The last occurrence of a repeated parameter wins, as in url_get_query_param
         function param(link, name,    value) {
             value = ""
@@ -295,8 +328,11 @@ subscription_parse() {
             # or its base64 may contain "/"
             if (link !~ "^(vless|ss|trojan|socks4|socks4a|socks5|hysteria2|hy2)://([^@]+@)?[^:/?#[]+:[0-9]+") next
             type = param(link, "type")
-            # sing-box decodes xhttp links itself, with all their parameters
-            if (decode_link && link ~ "^(vless|trojan)://" && type ~ "^(xhttp|splithttp)$") { print; next }
+            # xhttp is decoded by sing-box itself (podkop-engine) or built by podkop (sing-box-extended)
+            if (link ~ "^(vless|trojan)://" && type ~ "^(xhttp|splithttp)$") {
+                if (xhttp_ok) { print } else { xhttp_skipped++ }
+                next
+            }
             if (type != "" && type !~ "^(tcp|raw|ws|grpc)$") next
             security = param(link, "security")
             if (security != "" && security !~ "^(none|tls|reality)$") next
@@ -310,14 +346,16 @@ subscription_parse() {
             if (param(link, "plugin") != "") next
             print
         }
+        END { print xhttp_skipped + 0 > count_file }
     ' "$body_file" > "$outfile"
 
+    SUBSCRIPTION_XHTTP_SKIPPED="$(cat "$count_file")"
     total="$(grep -c . "$body_file")"
     kept="$(grep -c . "$outfile")"
-    rm -f "$body_file"
+    rm -f "$body_file" "$count_file"
 
     if [ "$kept" -lt "$total" ]; then
-        log "Subscription: skipped $((total - kept)) of $total links (unsupported scheme, transport or format)" "warn"
+        log "Subscription: skipped $((total - kept)) of $total links (unsupported scheme, transport or format)" "debug"
     fi
 
     [ "$kept" -gt 0 ]
@@ -378,6 +416,111 @@ _subscription_download_as() {
     return $rc
 }
 
+# Prints the identity of every one-line JSON outbound: type, server, port, credentials and transport
+_subscription_json_keys() {
+    jq -r '[.type, .server, (.server_port | tostring), (.uuid // .password // ""), (.transport.type // "tcp")]
+        | join("|")' "$1" 2> /dev/null
+}
+
+# Prints the identity of every link in the same form as _subscription_json_keys, a tab and the link
+_subscription_link_keys() {
+    awk '
+        function param(link, name,    value) {
+            value = ""
+            while (match(link, "[?&]" name "=[^&?#]*")) {
+                value = substr(link, RSTART + length(name) + 2, RLENGTH - length(name) - 2)
+                link = substr(link, RSTART + RLENGTH)
+            }
+            return value
+        }
+        {
+            link = $0
+            sub(/#.*/, "", link)
+            scheme = link
+            sub(/:.*/, "", scheme)
+            rest = link
+            sub(/^[^:]*:[/][/]/, "", rest)
+            secret = ""
+            if (index(rest, "@")) {
+                secret = rest
+                sub(/@.*/, "", secret)
+                sub(/^[^@]*@/, "", rest)
+            }
+            gsub(/%3A/, ":", secret)
+            sub(/[/?].*/, "", rest)
+            port = rest
+            sub(/^.*:/, "", port)
+            host = rest
+            sub(/:[0-9]+$/, "", host)
+            type = param(link, "type")
+            if (type == "" || type == "raw") type = "tcp"
+            if (type == "splithttp") type = "xhttp"
+            if (scheme == "ss") { scheme = "shadowsocks"; sub(/^[^:]*:/, "", secret) }
+            if (scheme == "hy2") scheme = "hysteria2"
+            printf "%s|%s|%s|%s|%s\t%s\n", scheme, host, port, secret, type, $0
+        }
+    ' "$1"
+}
+
+#######################################
+# Add the links that are not in the sing-box configuration of the same subscription to it. Panels give Xray clients
+# the servers that need Xray (xhttp) and sing-box clients the other ones, so each format has servers the other lacks.
+# Arguments:
+#   singbox_file: path to the one-line JSON outbounds
+#   links_file: path to the links
+#   outfile: path to save the result to
+#######################################
+_subscription_merge() {
+    local singbox_file="$1"
+    local links_file="$2"
+    local outfile="$3"
+
+    local keys_file
+    keys_file="$(mktemp)"
+    _subscription_json_keys "$singbox_file" > "$keys_file"
+
+    if [ ! -s "$keys_file" ]; then
+        cp "$links_file" "$outfile"
+        rm -f "$keys_file"
+        return 0
+    fi
+
+    cp "$singbox_file" "$outfile"
+    _subscription_link_keys "$links_file" |
+        awk -F '\t' 'NR == FNR { seen[$0] = 1; next } !($1 in seen) { sub(/^[^\t]*\t/, ""); print }' \
+            "$keys_file" - >> "$outfile"
+
+    rm -f "$keys_file"
+}
+
+# The panel returned Xray JSON: ask for the sing-box format as well and merge the two
+_subscription_download_merged() {
+    local url="$1"
+    local parsed_file="$2"
+    local bootstrap_dns_server="$3"
+    local hwid="$4"
+
+    local singbox_file xhttp_skipped agent
+    xhttp_skipped="$SUBSCRIPTION_XHTTP_SKIPPED"
+    singbox_file="$(mktemp)"
+
+    for agent in "$SUBSCRIPTION_USER_AGENT_SINGBOX" "$SUBSCRIPTION_USER_AGENT_HIDDIFY"; do
+        if _subscription_download_as "$url" "$singbox_file" "$bootstrap_dns_server" 1 "$agent" "$hwid" &&
+            [ "$SUBSCRIPTION_PARSED_KIND" = "singbox" ]; then
+            local merged_file
+            merged_file="$(mktemp)"
+            _subscription_merge "$singbox_file" "$parsed_file" "$merged_file"
+            cp "$merged_file" "$parsed_file"
+            rm -f "$merged_file"
+            break
+        fi
+    done
+
+    SUBSCRIPTION_PARSED_KIND="xray"
+    SUBSCRIPTION_XHTTP_SKIPPED="$xhttp_skipped"
+    rm -f "$singbox_file"
+}
+
 #######################################
 # Download a subscription and parse it. Panels choose the format of the response by the User-Agent and give an
 # unknown client something podkop cannot read (a JSON for Xray, a web page) or reject it. Then the subscription is
@@ -409,6 +552,10 @@ subscription_download() {
     _subscription_download_as "$url" "$parsed_file" "$bootstrap_dns_server" "$attempts" "$SUBSCRIPTION_USER_AGENT" \
         "$hwid"
     rc=$?
+    if [ "$rc" -eq 0 ] && [ "$SUBSCRIPTION_PARSED_KIND" = "xray" ]; then
+        _subscription_download_merged "$url" "$parsed_file" "$bootstrap_dns_server" "$hwid"
+        return 0
+    fi
     # 22: the server answered with an HTTP error, e.g. it rejects unknown clients
     if [ "$rc" -ne 2 ] && [ "$rc" -ne 22 ]; then
         [ "$rc" -eq 0 ]

@@ -142,6 +142,23 @@ sing_box_has_feature() {
     return 1
 }
 
+# Checks if the installed sing-box has the xhttp transport: podkop-engine reports it in the "Features:" line,
+# sing-box-extended has no such line but is recognized by its version
+sing_box_supports_xhttp() {
+    local version_output
+    version_output="$(sing-box version 2> /dev/null)"
+
+    case ",$(echo "$version_output" | sed -n 's/^Features:[[:space:]]*//p')," in
+    *",transport.xhttp,"*) return 0 ;;
+    esac
+
+    case "$(echo "$version_output" | head -n 1)" in
+    *extended*) return 0 ;;
+    esac
+
+    return 1
+}
+
 # Returns the scheme (protocol) part of a URL
 url_get_scheme() {
     local url="$1"

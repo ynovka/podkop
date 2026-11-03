@@ -749,6 +749,9 @@ _subscription_update_cache() {
                 if [ "$(md5sum < "$cache_file")" != "$sum_before" ]; then
                     subscriptions_changed=1
                     touch "$SUBSCRIPTION_PENDING_FILE"
+                    if [ "${SUBSCRIPTION_XHTTP_SKIPPED:-0}" -gt 0 ]; then
+                        log "Subscription from $(subscription_url_get_host "$url"): $SUBSCRIPTION_XHTTP_SKIPPED servers use the xhttp transport, which the installed sing-box does not support. Install podkop-engine (r11 or later) or sing-box-extended" "warn"
+                    fi
                     if [ -n "$sum_before" ]; then
                         added="$(grep -vxFf "$sum_before_file" "$valid_file" | grep -c .)"
                         removed="$(grep -vxFf "$valid_file" "$sum_before_file" | grep -c .)"

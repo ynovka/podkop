@@ -69,14 +69,17 @@ sing_box_cf_add_proxy_outbound() {
         ;;
     esac
 
-    # A link with the xhttp transport is decoded by sing-box itself, before any
-    # decoding here: its "extra" parameter is URL-encoded JSON
+    # A link with the xhttp transport is decoded by sing-box itself (podkop-engine), before any
+    # decoding here: its "extra" parameter is URL-encoded JSON. A sing-box without that is given the transport
+    # built by podkop if it has xhttp (sing-box-extended)
     case "$(url_get_scheme "$url")" in
     vless | trojan)
         case "$(url_get_query_param "$(url_strip_fragment "$url")" "type")" in
         xhttp | splithttp)
-            _add_decoded_proxy_outbound "$config" "$section" "$url"
-            return
+            if sing_box_has_feature "tools.decode-link"; then
+                _add_decoded_proxy_outbound "$config" "$section" "$url"
+                return
+            fi
             ;;
         esac
         ;;
@@ -321,12 +324,55 @@ _add_outbound_transport() {
             sing_box_cm_set_grpc_transport_for_outbound "$config" "$outbound_tag" "$grpc_service_name"
         )
         ;;
+    xhttp | splithttp)
+        if ! sing_box_supports_xhttp; then
+            log "The xhttp transport is not supported by the installed sing-box (podkop-engine r11 or later or sing-box-extended is required). Aborted." "fatal"
+            exit 1
+        fi
+
+        local xhttp_extra
+        xhttp_extra="$(_get_xhttp_extra_from_url "$url")" || {
+            log "Cannot read the xhttp parameters of a proxy link. Aborted." "fatal"
+            exit 1
+        }
+
+        config=$(
+            sing_box_cm_set_xhttp_transport_for_outbound \
+                "$config" \
+                "$outbound_tag" \
+                "$(url_get_query_param "$url" "path")" \
+                "$(url_get_query_param "$url" "host")" \
+                "$(url_get_query_param "$url" "mode")" \
+                "$xhttp_extra"
+        ) || {
+            log "The xhttp settings of a proxy link are not supported. Aborted." "fatal"
+            exit 1
+        }
+        ;;
     *)
         log "Unknown transport '$transport' detected." "error"
         ;;
     esac
 
     echo "$config"
+}
+
+# Prints the JSON object with the XHTTP options of a link. Xray writes them in "extra"; some panels write them as
+# separate parameters of the link as well, they are used where "extra" does not have the option.
+_get_xhttp_extra_from_url() {
+    local url="$1"
+
+    local extra name value options="{}"
+    extra="$(url_get_query_param "$url" "extra")"
+    [ -n "$extra" ] || extra="{}"
+    echo "$extra" | jq -e 'type == "object"' > /dev/null 2>&1 || return 1
+
+    for name in xPaddingBytes scMaxEachPostBytes scMinPostsIntervalMs scMaxBufferedPosts noGRPCHeader; do
+        value="$(url_get_query_param "$url" "$name")"
+        [ -n "$value" ] && options="$(echo "$options" | jq -c --arg name "$name" --arg value "$value" '.[$name] = $value')"
+    done
+
+    jq -c -n --argjson link "$options" --argjson extra "$extra" '$link + $extra'
 }
 
 sing_box_cf_add_json_outbound() {

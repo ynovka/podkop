@@ -739,6 +739,79 @@ sing_box_cm_add_hysteria2_outbound() {
 }
 
 #######################################
+# Set the XHTTP transport (sing-box-extended) for a VLESS or Trojan outbound. The options are named as in the "extra"
+# of Xray links and are written under the names of sing-box-extended. Settings of a separate download server
+# ("downloadSettings") are not supported: they need podkop-engine.
+# Arguments:
+#   config: string (JSON), sing-box configuration to modify
+#   tag: string, tag of the outbound
+#   path: string, path of the requests (optional)
+#   host: string, Host header (optional)
+#   mode: string, auto, packet-up, stream-up or stream-one (optional, auto by default)
+#   extra: string (JSON object), the options of Xray
+# Outputs:
+#   Writes updated JSON configuration to stdout, fails if the options cannot be used
+#######################################
+sing_box_cm_set_xhttp_transport_for_outbound() {
+    local config="$1"
+    local tag="$2"
+    local path="$3"
+    local host="$4"
+    local mode="$5"
+    local extra="$6"
+
+    echo "$config" | jq -e \
+        --arg tag "$tag" \
+        --arg path "$path" \
+        --arg host "$host" \
+        --arg mode "$mode" \
+        --argjson extra "$extra" \
+        '
+        def names: {
+            xPaddingBytes: "x_padding_bytes", noGRPCHeader: "no_grpc_header", noSSEHeader: "no_sse_header",
+            scMaxEachPostBytes: "sc_max_each_post_bytes", scMinPostsIntervalMs: "sc_min_posts_interval_ms",
+            scMaxBufferedPosts: "sc_max_buffered_posts", scStreamUpServerSecs: "sc_stream_up_server_secs",
+            xPaddingObfsMode: "x_padding_obfs_mode", xPaddingKey: "x_padding_key",
+            xPaddingHeader: "x_padding_header", xPaddingPlacement: "x_padding_placement",
+            xPaddingMethod: "x_padding_method", uplinkHTTPMethod: "uplink_http_method",
+            sessionPlacement: "session_placement", sessionIDPlacement: "session_placement",
+            sessionKey: "session_key", sessionIDKey: "session_key", sessionIDTable: "session_id_table",
+            sessionIDLength: "session_id_length", seqPlacement: "seq_placement", seqKey: "seq_key",
+            uplinkDataPlacement: "uplink_data_placement", uplinkDataKey: "uplink_data_key",
+            uplinkChunkSize: "uplink_chunk_size", serverMaxHeaderBytes: "server_max_header_bytes"
+        };
+        def xmux_names: {
+            maxConcurrency: "max_concurrency", maxConnections: "max_connections", cMaxReuseTimes: "c_max_reuse_times",
+            hMaxRequestTimes: "h_max_request_times", hMaxReusableSecs: "h_max_reusable_secs",
+            hKeepAlivePeriod: "h_keep_alive_period"
+        };
+        # Options that are not set, empty or zero are left to the defaults of sing-box
+        def used: select(. != null and . != "" and . != 0 and . != false);
+        def rename($table): to_entries | map(select(.key | in($table)) | {key: $table[.key], value: (.value | used)})
+            | map(select(.value != null)) | from_entries;
+
+        if ($extra.downloadSettings // $extra.download) != null then error("downloadSettings")
+        else
+            ($extra.headers // {}) as $headers
+            | ($headers | to_entries | map(select(.key | ascii_downcase == "host")) | .[0].value) as $header_host
+            | (($extra.xmux // {}) | rename(xmux_names)) as $xmux
+            | (.outbounds[] | select(.tag == $tag)) += {
+                transport: (
+                    {type: "xhttp", mode: (if $mode == "" then "auto" else $mode end), x_padding_bytes: "100-1000"}
+                    + (if $path != "" then {path: $path} else {} end)
+                    + (if $host != "" then {host: $host} elif $header_host != null then {host: $header_host} else {} end)
+                    + ($extra | rename(names))
+                    + (if ($xmux | length) > 0 then {xmux: $xmux} else {} end)
+                    + (($headers | to_entries | map(select(.key | ascii_downcase != "host")) | from_entries) as $h
+                        | if ($h | length) > 0 then {headers: $h} else {} end)
+                )
+            }
+            | (.outbounds[] | select(.tag == $tag and .tls != null and .tls.alpn == null)).tls.alpn = ["h2", "http/1.1"]
+        end
+        '
+}
+
+#######################################
 # Set gRPC transport settings for an outbound in a sing-box JSON configuration.
 # Arguments:
 #   config: string (JSON), sing-box configuration to modify
